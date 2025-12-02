@@ -1,20 +1,17 @@
 // src/components/WithdrawModal/review-withdraw-modal.tsx
 'use client'
 
-import { FC, useCallback, useMemo, useState } from 'react'
+import { FC, useMemo, useState } from 'react'
 import Image from 'next/image'
 import { X, Check, ExternalLink, AlertCircle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useWalletClient } from 'wagmi'
 import type { Address } from 'viem'
+import { parseUnits } from 'viem'
+import { optimism } from 'viem/chains'
 import type { YieldSnapshot } from '@/hooks/useYields'
 import { TokenAddresses } from '@/lib/constants'
-import { withdrawMorphoOnLisk } from '@/lib/withdrawer'
-import { bridgeWithdrawal } from '@/lib/bridge'
-import { publicLisk } from '@/lib/clients'
-import { erc20Abi } from 'viem'
-import { CHAINS } from '@/lib/wallet'
-import { switchOrAddChain } from '@/lib/wallet'
+import { CHAINS, switchOrAddChain } from '@/lib/wallet'
 import lifi from '@/public/logo_lifi_light_vertical.png'
 import { WithdrawSuccessModal } from './withdraw-success-modal'
 
@@ -26,9 +23,8 @@ type ChainSel = 'optimism'
 
 type FlowStep =
   | 'idle'
-  | 'withdrawing'   // withdrawing from vault on Lisk
-  | 'sign-bridge'   // user should sign bridge tx
-  | 'bridging'      // bridge in flight
+  | 'withdrawing' // signing + server-side burn/redeem
+  | 'bridging'    // server-side Li.Fi bridge in flight
   | 'success'
   | 'error'
 
@@ -41,7 +37,7 @@ interface Props {
   amountOnLiskDisplay: number
   // estimated bridge fee in dest token units
   bridgeFeeDisplay: number
-  // (old prop – now superseded by internal net calculation, but kept for compatibility)
+  // estimated amount on dest (we now use this as a floor for minAmountOut)
   receiveOnDestDisplay: number
   dest: ChainSel
   user: `0x${string}`
@@ -60,20 +56,30 @@ const ICON = {
   USDT0: '/tokens/usdt0-icon.png',
 } as const
 
-async function readLiskBalance(
-  token: `0x${string}`,
-  user: `0x${string}`,
-): Promise<bigint> {
-  try {
-    return (await publicLisk.readContract({
-      address: token,
-      abi: erc20Abi,
-      functionName: 'balanceOf',
-      args: [user],
-    })) as bigint
-  } catch {
-    return 0n
-  }
+const WITHDRAW_TYPES = {
+  WithdrawIntent: [
+    { name: 'user',         type: 'address' },
+    { name: 'amountShares', type: 'uint256' },
+    { name: 'dstChainId',   type: 'uint256' },
+    { name: 'dstToken',     type: 'address' },
+    { name: 'minAmountOut', type: 'uint256' },
+    { name: 'deadline',     type: 'uint256' },
+    { name: 'nonce',        type: 'uint256' },
+    { name: 'refId',        type: 'bytes32' },
+  ],
+} as const
+
+function jsonBigintStr(x: bigint) {
+  return x.toString()
+}
+
+function randomRefId(): `0x${string}` {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  const hex = Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+  return (`0x${hex}`) as `0x${string}`
 }
 
 /* -------------------------------------------------------------------------- */
@@ -87,19 +93,16 @@ export const ReviewWithdrawModal: FC<Props> = ({
   shares,
   amountOnLiskDisplay,
   bridgeFeeDisplay,
-  receiveOnDestDisplay, // not used in new math, kept for compat
+  receiveOnDestDisplay,
   dest,
   user,
 }) => {
-  const { data: walletClient, refetch: refetchWalletClient } = useWalletClient()
+  const { data: walletClient } = useWalletClient()
 
   const [step, setStep] = useState<FlowStep>('idle')
   const [err, setErr] = useState<string | null>(null)
   const [showSuccess, setShowSuccess] = useState(false)
-
-  // remember whether withdraw succeeded, and how much to bridge
-  const [withdrawOk, setWithdrawOk] = useState(false)
-  const [bridgableAmount, setBridgableAmount] = useState<bigint | null>(null)
+  const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
 
   const liskToken: 'USDCe' | 'USDT0' = tokenLabelOnLisk(
     snap.token as 'USDC' | 'USDT',
@@ -114,234 +117,206 @@ export const ReviewWithdrawModal: FC<Props> = ({
     [liskToken],
   )
 
+  const dstTokenAddr = useMemo(
+    () =>
+      destSymbol === 'USDT'
+        ? (TokenAddresses.USDT.optimism as `0x${string}`)
+        : (TokenAddresses.USDC.optimism as `0x${string}`),
+    [destSymbol],
+  )
+
   // ----- Fee math (UI-only, estimates) ---------------------------------------
   const grossAmount = amountOnLiskDisplay || 0
-  const protocolFeePct = 0.005 // 0.5% vault withdraw fee
+  const protocolFeePct = 0.005 // 0.5% vault withdraw fee (UI, off-chain)
   const protocolFeeAmount = grossAmount > 0 ? grossAmount * protocolFeePct : 0
   const bridgeFeeAmount = bridgeFeeDisplay || 0
 
-  // Net amounts (approximate)
+  // Net amounts (approximate, for display)
   const netOnLisk = Math.max(grossAmount - protocolFeeAmount, 0)
-  const netOnDest = Math.max(grossAmount - protocolFeeAmount - bridgeFeeAmount, 0)
-
-  // Visual helpers (for step rows)
-  const trigger1Done =
-    withdrawOk ||
-    step === 'sign-bridge' ||
-    step === 'bridging' ||
-    step === 'success'
-
-  const trigger2InError = step === 'error' && err?.toLowerCase().includes('signature')
-  const trigger3InError = step === 'error' && !trigger2InError && withdrawOk
+  const netOnDest = Math.max(
+    grossAmount - protocolFeeAmount - bridgeFeeAmount,
+    0,
+  )
 
   const primaryLabel =
     step === 'success'
       ? 'Done'
       : step === 'withdrawing'
       ? 'Withdrawing…'
-      : step === 'sign-bridge'
-      ? 'Sign bridge transaction…'
       : step === 'bridging'
       ? 'Bridging…'
-      : step === 'error' && withdrawOk
-      ? 'Try bridge again'
       : step === 'error'
       ? 'Try again'
       : 'Withdraw now'
 
   /* ------------------------------------------------------------------------ */
-  /* Flow pieces                                                              */
-  /* ------------------------------------------------------------------------ */
-
-  async function performWithdraw(): Promise<bigint> {
-    if (!walletClient) throw new Error('Wallet not connected')
-  
-    // 1) switch to Lisk
-    await switchOrAddChain(walletClient, CHAINS.lisk)
-  
-    // 2) IMPORTANT: refetch the walletClient because provider changed!
-    const { data: freshClient } = await refetchWalletClient()
-    const wc = freshClient ?? walletClient
-  
-    // measure delta
-    const pre = await readLiskBalance(liskTokenAddr as `0x${string}`, user)
-  
-    await withdrawMorphoOnLisk({
-      token: liskToken,
-      shares,
-      shareToken: snap.poolAddress,
-      underlying: liskTokenAddr as `0x${string}`,
-      to: user,
-      wallet: wc,        // 👈 corrected wallet instance
-    })
-  
-    // poll for arrival
-    let tries = 0
-    while (tries++ < 40) {
-      const cur = await readLiskBalance(liskTokenAddr as `0x${string}`, user)
-      if (cur > pre) return cur - pre
-      await new Promise((r) => setTimeout(r, 1500))
-    }
-  
-    const cur = await readLiskBalance(liskTokenAddr as `0x${string}`, user)
-    if (cur <= pre) throw new Error('Withdrawal did not arrive on Lisk')
-    return cur - pre
-  }
-  
-
-  async function performBridge(amount: bigint) {
-    if (!walletClient) throw new Error('Wallet not connected')
-
-    setStep('sign-bridge')
-    await new Promise((r) => setTimeout(r, 80)) // small UX pause
-    setStep('bridging')
-
-    const toChain ='optimism'
-
-    await bridgeWithdrawal({
-      srcVaultToken: liskToken, // 'USDCe' | 'USDT0'
-      destToken: destSymbol, // 'USDC' | 'USDT'
-      amount,
-      to: toChain,
-      walletClient,
-    })
-
-    // Switch user back to OP when done
-    await switchOrAddChain(walletClient, CHAINS.optimism)
-
-    setStep('success')
-    setShowSuccess(true)
-  }
-
-  /* ------------------------------------------------------------------------ */
-  /* Main confirm flow – SINGLE click like Deposit                            */
+  /* Main confirm flow — using withdraw APIs                                  */
   /* ------------------------------------------------------------------------ */
 
   async function handleConfirm() {
-    if (!walletClient) throw new Error("Wallet not connected");
-    setStep('withdrawing') 
-    try {
-      setErr(null);
-      setWithdrawOk(false);
-      setBridgableAmount(null);
-   
-  
-      /* ------------------------------------------------------------- */
-      /* 1) SWITCH TO LISK                                              */
-      /* ------------------------------------------------------------- */
-  
-      await switchOrAddChain(walletClient, CHAINS.lisk);
-  
-      // After chain switch, get a fresh wallet client
-      const { data: freshClient } = await refetchWalletClient();
-      const wc = freshClient ?? walletClient;
-  
-      /* ------------------------------------------------------------- */
-      /* 2) PERFORM WITHDRAW                                            */
-      /* ------------------------------------------------------------- */
-  
-      const pre = await publicLisk.readContract({
-        address: liskTokenAddr,
-        abi: erc20Abi,
-        functionName: "balanceOf",
-        args: [user],
-      });
-  
-      await withdrawMorphoOnLisk({
-        token: liskToken,
-        shares,
-        shareToken: snap.poolAddress,
-        underlying: liskTokenAddr as `0x${string}`,
-        to: user,
-        wallet: wc,
-      });
-  
-      // Poll until balance increases
-      let delta = 0n;
-      for (let i = 0; i < 40; i++) {
-        const cur = await publicLisk.readContract({
-          address: liskTokenAddr,
-          abi: erc20Abi,
-          functionName: "balanceOf",
-          args: [user],
-        });
-        if (cur > pre) {
-          delta = cur - pre;
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 1500));
-      }
-  
-      if (delta <= 0n) throw new Error("Withdrawal did not arrive on Lisk");
-  
-      setWithdrawOk(true);
-      setBridgableAmount(delta);
-  
-      /* ------------------------------------------------------------- */
-      /* 3) BRIDGE TO OP                                                */
-      /* ------------------------------------------------------------- */
-  
-      setStep("sign-bridge");
-      await new Promise((r) => setTimeout(r, 50));
-      setStep("bridging");
-  
-      await bridgeWithdrawal({
-        srcVaultToken: liskToken,
-        destToken: destSymbol,
-        amount: delta,
-        to: "optimism",
-        walletClient: wc,
-      });
-  
-      /* ------------------------------------------------------------- */
-      /* 4) SWITCH BACK TO OP                                           */
-      /* ------------------------------------------------------------- */
-  
-      await switchOrAddChain(wc, CHAINS.optimism);
-  
-      /* ------------------------------------------------------------- */
-      /* 5) DONE                                                        */
-      /* ------------------------------------------------------------- */
-  
-      setStep("success");
-      setShowSuccess(true);
-    } catch (e: any) {
-      console.error("WITHDRAW FLOW FAILED:", e);
-      const code = e?.code ?? e?.error?.code;
-      if (code === 4001) {
-        setErr("Signature was cancelled.");
-      } else {
-        setErr(e?.message ?? String(e));
-      }
-      setStep("error");
+    if (!walletClient) {
+      setErr('Wallet not connected')
+      setStep('error')
+      return
     }
-  }
-  
 
-  /* ------------------------------------------------------------------------ */
-  /* Bridge-only retry (after successful withdraw)                            */
-  /* ------------------------------------------------------------------------ */
-
-  async function resumeBridgeOnly() {
-    if (!walletClient) return
     try {
       setErr(null)
+      setStep('withdrawing')
 
-      let amount = bridgableAmount
-      if (!amount || amount <= 0n) {
-        amount = await readLiskBalance(liskTokenAddr as `0x${string}`, user)
+      // 1) Make sure we are on OP to sign the intent
+      await switchOrAddChain(walletClient, CHAINS.optimism)
+
+      const nowMs = Date.now()
+      const nowSec = Math.floor(nowMs / 1000)
+      const deadlineSec = nowSec + 60 * 60 // 1h
+      const nonceStr = String(nowMs)
+
+      // Conservative minAmountOut (in dest token units, 6 decimals)
+      // Use receiveOnDestDisplay if provided, otherwise approximate from netOnDest.
+      const baseMinOutDisplay =
+        receiveOnDestDisplay && receiveOnDestDisplay > 0
+          ? receiveOnDestDisplay
+          : netOnDest
+
+      // Take an extra haircut to avoid underflow vs actual redeemed balance.
+      const conservativeDisplay = baseMinOutDisplay * 0.98
+      const minAmountOutBn = parseUnits(
+        conservativeDisplay.toFixed(6),
+        6, // USDC/USDT decimals
+      )
+
+      const amountSharesStr = shares.toString()
+      const dstChainIdNum = optimism.id
+      const deadlineStr = String(deadlineSec)
+      const minAmountOutStr = jsonBigintStr(minAmountOutBn)
+      const refId = currentRefId ?? randomRefId()
+
+      // 2) Build typed data message for signing
+      const domain = {
+        name: 'SuperYLDR',
+        version: '1',
+        chainId: optimism.id,
+      } as const
+
+      const message = {
+        user,
+        amountShares: BigInt(amountSharesStr),
+        dstChainId: BigInt(dstChainIdNum),
+        dstToken: dstTokenAddr,
+        minAmountOut: minAmountOutBn,
+        deadline: BigInt(deadlineStr),
+        nonce: BigInt(nonceStr),
+        refId,
+      } as const
+
+      const signature = await walletClient.signTypedData({
+        account: user,
+        domain,
+        types: WITHDRAW_TYPES,
+        primaryType: 'WithdrawIntent',
+        message,
+      })
+
+      // 3) Create intent on backend (idempotent)
+      const createRes = await fetch('/api/withdraw/create-intent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          intent: {
+            user,
+            amountShares: amountSharesStr,
+            dstChainId: dstChainIdNum,
+            dstToken: dstTokenAddr,
+            minAmountOut: minAmountOutStr,
+            deadline: deadlineStr,
+            nonce: nonceStr,
+            refId,
+            signedChainId: optimism.id,
+          },
+          signature,
+        }),
+      })
+
+      const createJson = await createRes.json().catch(() => null)
+
+      if (!createRes.ok || !createJson?.ok) {
+        throw new Error(createJson?.error || 'Failed to create withdraw intent')
       }
-      if (!amount || amount <= 0n) throw new Error('No funds available on Lisk to bridge')
 
-      await performBridge(amount)
+      const finalRefId = (createJson.refId as `0x${string}` | undefined) ?? refId
+      setCurrentRefId(finalRefId)
+
+      // 4) Ask backend to burn → redeem → bridge (idempotent)
+      setStep('bridging')
+
+      const finishRes = await fetch('/api/withdraw/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refId: finalRefId }),
+      })
+
+      const finishJson = await finishRes.json().catch(() => null)
+
+      if (!finishRes.ok || !finishJson?.ok) {
+        throw new Error(
+          finishJson?.error || 'Failed to finalize withdrawal & bridge',
+        )
+      }
+
+      setStep('success')
+      setShowSuccess(true)
     } catch (e: any) {
+      console.error('[withdraw modal] handleConfirm failed:', e)
+      const code = e?.code ?? e?.error?.code
+      if (code === 4001) {
+        setErr('Signature was cancelled.')
+      } else {
+        setErr(e?.message ?? String(e))
+      }
+      setStep('error')
+    }
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* Retry: simply re-run finish, which is idempotent                          */
+  /* ------------------------------------------------------------------------ */
+
+  async function retryFinishOnly() {
+    if (!walletClient || !currentRefId) {
+      // If we somehow lost refId, just restart full flow
+      await handleConfirm()
+      return
+    }
+
+    try {
+      setErr(null)
+      setStep('bridging')
+
+      const finishRes = await fetch('/api/withdraw/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refId: currentRefId }),
+      })
+
+      const finishJson = await finishRes.json().catch(() => null)
+
+      if (!finishRes.ok || !finishJson?.ok) {
+        throw new Error(
+          finishJson?.error || 'Failed to finalize withdrawal & bridge',
+        )
+      }
+
+      setStep('success')
+      setShowSuccess(true)
+    } catch (e: any) {
+      console.error('[withdraw modal] retryFinishOnly failed:', e)
       const code = e?.code ?? e?.error?.code
       if (code === 4001) {
         setErr('Signature was cancelled. You can try again.')
-        setStep('error')
-        return
+      } else {
+        setErr(e?.message ?? String(e))
       }
-      setErr(e?.message ?? String(e))
       setStep('error')
     }
   }
@@ -357,11 +332,9 @@ export const ReviewWithdrawModal: FC<Props> = ({
     }
 
     if (step === 'error') {
-      if (withdrawOk) {
-        // withdraw done, bridge failed → resume bridge only
-        void resumeBridgeOnly()
+      if (currentRefId) {
+        void retryFinishOnly()
       } else {
-        // withdraw failed → restart full flow
         void handleConfirm()
       }
       return
@@ -373,11 +346,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
     }
   }
 
-  const isWorking =
-    step === 'withdrawing' ||
-    step === 'sign-bridge' ||
-    step === 'bridging'
-
+  const isWorking = step === 'withdrawing' || step === 'bridging'
   const disabled = !walletClient || isWorking
 
   // Convenience for display
@@ -388,10 +357,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
   // Step hint (intermediate copy)
   const stepHint = (() => {
     if (step === 'withdrawing') {
-      return 'Withdrawing from the vault on Lisk. This usually takes under a minute.'
-    }
-    if (step === 'sign-bridge') {
-      return 'Please confirm the bridge transaction in your wallet.'
+      return 'Burning your vault shares and redeeming on Lisk. This usually takes under a minute.'
     }
     if (step === 'bridging') {
       return 'Bridge in progress. Final arrival time depends on network congestion.'
@@ -400,21 +366,17 @@ export const ReviewWithdrawModal: FC<Props> = ({
       return 'Withdrawal complete. Your balances should update shortly.'
     }
     if (step === 'error') {
-      return 'Something went wrong. Check the steps above and retry.'
+      return err || 'Something went wrong. Check the steps above and retry.'
     }
     return 'Review the details and confirm your withdrawal.'
   })()
 
-  // If withdraw fails (step=error && !withdrawOk), we hide the bridge block entirely
-  const showBridgeBlock = !(step === 'error' && !withdrawOk)
-
-  // Show bridge step 2 only once we actually enter bridge phase / error
+  const showBridgeBlock = true
   const showBridgeStep2 =
-    step === 'sign-bridge' ||
+    step === 'withdrawing' ||
     step === 'bridging' ||
     step === 'success' ||
-    trigger2InError ||
-    trigger3InError
+    step === 'error'
 
   /* ------------------------------------------------------------------------ */
   /* Render                                                                   */
@@ -464,11 +426,11 @@ export const ReviewWithdrawModal: FC<Props> = ({
               </div>
             </div>
 
-            {/* withdrawal failed step (reverse of deposit failed) */}
-            {step === 'error' && !withdrawOk && (
+            {/* Withdrawal error indicator */}
+            {step === 'error' && (
               <div className="flex items-center gap-2 text-xs text-red-600 ml-11">
                 <AlertCircle className="h-4 w-4" />
-                <span>Withdrawal failed</span>
+                <span>{err || 'Withdrawal failed'}</span>
               </div>
             )}
 
@@ -501,7 +463,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
               </div>
             </div>
 
-            {/* row 3: bridging via LI.FI (hidden entirely if withdraw step failed) */}
+            {/* row 3: bridging via LI.FI (relayer-only) */}
             {showBridgeBlock && (
               <div className="flex items-start gap-3">
                 <div className="relative mt-0.5">
@@ -516,42 +478,43 @@ export const ReviewWithdrawModal: FC<Props> = ({
                 <div className="flex-1">
                   <div className="text-lg font-semibold">Bridging via LI.FI</div>
                   <div className="text-xs text-muted-foreground">
+                    Bridge happens via the relayer. No extra signatures needed.
+                  </div>
+                  <div className="text-xs text-muted-foreground">
                     Bridge fee (est.): {bridgeFeeAmount.toFixed(6)} {destSymbol}
                   </div>
 
                   <div className="mt-2 space-y-2 text-xs">
-                    {/* Step 1: spending approved (initial state) */}
+                    {/* Step 1 */}
                     <div className="flex items-center gap-2">
-                      {trigger1Done ? (
+                      {step === 'bridging' || step === 'success' ? (
                         <Check className="h-4 w-4 text-emerald-500" />
-                      ) : step === 'error' && !withdrawOk ? (
-                        <AlertCircle className="h-4 w-4 text-red-500" />
                       ) : step === 'withdrawing' ? (
                         <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
+                      ) : step === 'error' ? (
+                        <AlertCircle className="h-4 w-4 text-red-500" />
                       ) : (
                         <span className="h-2 w-2 rounded-full bg-muted-foreground/40" />
                       )}
-                      <span>{destSymbol} spending approved</span>
+                      <span>Burn & redeem vault shares</span>
                     </div>
 
-                    {/* Step 2: bridge transaction */}
+                    {/* Step 2 */}
                     {showBridgeStep2 && (
                       <div className="flex items-center gap-2">
-                        {trigger3InError || trigger2InError ? (
-                          <AlertCircle className="h-4 w-4 text-red-500" />
-                        ) : step === 'sign-bridge' || step === 'bridging' ? (
+                        {step === 'bridging' ? (
                           <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
                         ) : step === 'success' ? (
                           <Check className="h-4 w-4 text-emerald-500" />
+                        ) : step === 'error' ? (
+                          <AlertCircle className="h-4 w-4 text-red-500" />
                         ) : (
                           <span className="h-2 w-2 rounded-full bg-muted-foreground/40" />
                         )}
                         <span>
-                          {trigger3InError
-                            ? 'Bridge failed'
-                            : trigger2InError
-                            ? 'Signature required'
-                            : 'Bridge transaction confirmed'}
+                          {step === 'error'
+                            ? 'Bridge or redeem may have failed'
+                            : 'Bridge to OP Mainnet'}
                         </span>
                       </div>
                     )}
@@ -606,7 +569,6 @@ export const ReviewWithdrawModal: FC<Props> = ({
               </div>
             </div>
 
-            {/* No big error box – states above are the UX */}
             {stepHint && (
               <div className="text-xs text-muted-foreground">
                 {stepHint}

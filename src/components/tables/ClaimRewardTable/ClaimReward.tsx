@@ -5,23 +5,18 @@ import React, { useMemo, useState } from "react";
 import ClaimRewardTable from ".";
 import { ClaimableRewardColumns, type ClaimableReward } from "./columns";
 
-import { useMerklRewards, type FlatReward } from "@/hooks/useMerklRewards";
 import { useAppKit } from "@reown/appkit/react";
 import { useWalletClient, useSwitchChain, useChainId } from "wagmi";
-import { base, optimism, lisk } from "viem/chains";
+import { optimism } from "viem/chains";
 import type { Address } from "viem";
 import { formatUnits } from "viem";
 import { Button } from "@/components/ui/button";
-import { RefreshCw, Loader2 } from "lucide-react";
-import { MERKL_DISTRIBUTOR, distributorAbi, buildClaimArgs } from "@/lib/merkl";
-import { ClaimRewardsModal } from "@/components/claim-rewards-modal";
-import { useUsdPrices } from "@/hooks/useUSDPrices";
+import { Loader2 } from "lucide-react";
 
-const CHAIN_LABEL: Record<number, string> = {
-  [lisk.id]: "Lisk",
-  [optimism.id]: "Optimism",
-  [base.id]: "Base",
-};
+import { useVaultRewards, type DualRewardsData } from "@/hooks/useVaultRewards";
+import rewardsAbi from "@/lib/abi/rewardsAbi.json";
+import { useUsdPrices } from "@/hooks/useUSDPrices";
+import { ClaimRewardsModal } from "@/components/claim-rewards-modal";
 
 function formatNumber(n: number, maxFrac = 6) {
   return n.toLocaleString(undefined, {
@@ -30,84 +25,112 @@ function formatNumber(n: number, maxFrac = 6) {
   });
 }
 
+type RowRaw = {
+  symbol: "USDC" | "USDT";
+  vault: `0x${string}`;
+  earned: bigint;
+};
+
 const ClaimRewards: React.FC = () => {
-  const { rewards, isLoading, refetch } = useMerklRewards();
   const { open: openConnect } = useAppKit();
-  const { data: wallet, refetch: refetchWalletClient } = useWalletClient(); // ⬅️ refetch
+  const { data: wallet, refetch: refetchWalletClient } = useWalletClient();
   const { switchChainAsync } = useSwitchChain();
   const activeChainId = useChainId();
+
+  const {
+    data: dualRewards,
+    isLoading,
+    refetch,
+    user,
+  } = useVaultRewards();
 
   const { priceUsdForSymbol } = useUsdPrices();
 
   const [claimingKey, setClaimingKey] = useState<string | null>(null);
 
   const [showModal, setShowModal] = useState(false);
-  const [selectedReward, setSelectedReward] =
-    useState<(ClaimableReward & { __raw?: FlatReward }) | null>(null);
+  const [selectedReward, setSelectedReward] = useState<
+    (ClaimableReward & { __raw?: RowRaw }) | null
+  >(null);
 
-  const tableData: (ClaimableReward & { __raw: FlatReward })[] = useMemo(() => {
-    if (!rewards || rewards.length === 0) return [];
+  // ────────────────────────────────────────────────────────────────
+  // Build table rows from DualRewardsData
+  // ────────────────────────────────────────────────────────────────
+  const tableData: (ClaimableReward & { __raw: RowRaw })[] = useMemo(() => {
+    if (!dualRewards) return [];
 
-    return rewards.map((r) => {
-      const qty =
-        Number(formatUnits(BigInt(r.claimable), r.token.decimals)) || 0;
+    const rows: (ClaimableReward & { __raw: RowRaw })[] = [];
 
-      return {
-        network: CHAIN_LABEL[r.chainId] ?? `Chain ${r.chainId}`,
-        source: "Merkl",
-        claimable: qty.toString(),
-        token: r.token.symbol,
-        __raw: r,
-      };
-    });
-  }, [rewards]);
+    const pushRow = (
+      symbol: "USDC" | "USDT",
+      tokenData: DualRewardsData["byToken"]["USDC" | "USDT"]
+    ) => {
+      const earned = tokenData.earned ?? 0n;
+      const human = Number(formatUnits(earned, 6)); // both USDC/USDT are 6d
 
-  function onClaimClick(row: ClaimableReward & { __raw?: FlatReward }) {
-    if (!wallet) return openConnect?.();
+      rows.push({
+        network: "Optimism",
+        source: "Vault rewards",
+        claimable: human.toString(),
+        token: symbol,
+        __raw: {
+          symbol,
+          vault: tokenData.vault,
+          earned,
+        },
+      });
+    };
+
+    if (dualRewards.byToken.USDC) {
+      pushRow("USDC", dualRewards.byToken.USDC);
+    }
+    if (dualRewards.byToken.USDT) {
+      pushRow("USDT", dualRewards.byToken.USDT);
+    }
+
+    return rows;
+  }, [dualRewards]);
+
+  function onClaimClick(row: ClaimableReward & { __raw?: RowRaw }) {
+    if (!wallet || !user) return openConnect?.();
     setSelectedReward(row);
     setShowModal(true);
   }
 
+  // ────────────────────────────────────────────────────────────────
+  // Claim from a single rewards vault (per token)
+  // ────────────────────────────────────────────────────────────────
   async function handleModalClaim() {
-    if (!wallet || !selectedReward) return;
+    if (!wallet || !user || !selectedReward) return;
 
     const item = selectedReward.__raw!;
-    const chainId = item.chainId;
+    const { vault, symbol } = item;
 
     try {
-      const key = `${chainId}-${item.token.address.toLowerCase()}`;
+      const key = vault.toLowerCase();
       setClaimingKey(key);
 
-      const distributor = MERKL_DISTRIBUTOR[chainId];
-      if (!distributor)
-        throw new Error(`Missing Merkl Distributor for chain ${chainId}`);
-
-      // --- ensure we're on the right chain & refresh the wallet client ---
+      // ensure Optimism
       let signer = wallet;
 
-      if (activeChainId !== chainId && switchChainAsync) {
-        await switchChainAsync({ chainId });
+      if (activeChainId !== optimism.id && switchChainAsync) {
+        await switchChainAsync({ chainId: optimism.id });
         const refreshed = (await refetchWalletClient()).data;
-        if (refreshed) {
-          signer = refreshed;
-        }
+        if (refreshed) signer = refreshed;
       }
 
       if (!signer) {
         throw new Error("No wallet client available after chain switch");
       }
 
-      const { users, tokens, amounts, proofs } = buildClaimArgs({
-        user: signer.account!.address as Address,
-        items: [item],
-      });
-
+      // NOTE: assumes rewardsAbi has a `getReward(address)` or similar.
+      // If your function name/args differ, adjust here.
       await signer.writeContract({
-        address: distributor,
-        abi: distributorAbi,
-        functionName: "claim",
-        args: [users, tokens, amounts, proofs],
-        account: signer.account!.address as Address,
+        address: vault,
+        abi: rewardsAbi as any,
+        functionName: "getReward", // 🔁 change if your ABI uses another name
+        args: [user as Address],
+        account: user as Address,
       });
 
       await refetch();
@@ -138,12 +161,9 @@ const ClaimRewards: React.FC = () => {
             onClaim: onClaimClick,
             priceUsdForSymbol,
             isClaiming: (r: any) => {
-              const raw = (r as any).__raw as FlatReward | undefined;
+              const raw = (r as any).__raw as RowRaw | undefined;
               if (!raw) return false;
-              return (
-                claimingKey ===
-                `${raw.chainId}-${raw.token.address.toLowerCase()}`
-              );
+              return claimingKey === raw.vault.toLowerCase();
             },
           }}
           emptyMessage="No rewards to claim yet."

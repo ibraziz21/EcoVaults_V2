@@ -168,7 +168,7 @@ export function DepositWithdraw({
   );
 
   const withdrawBalanceHuman = useMemo(
-    () => formatAmountBigint(BigInt(withdrawPosition?.amount ?? 0n), 18),
+    () => formatAmountBigint(BigInt(withdrawPosition?.amount ?? 0n), 6),
     [withdrawPosition],
   );
 
@@ -463,7 +463,7 @@ const src = 'optimism' as const;
   );
   const withdrawSharesBigint = useMemo(() => {
     try {
-      return parseUnits(amount || '0', 18);
+      return parseUnits(amount || '0', 6);
     } catch {
       return 0n;
     }

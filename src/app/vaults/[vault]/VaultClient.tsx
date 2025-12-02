@@ -1,9 +1,9 @@
+// src/app/vaults/[vault]/VaultClient.tsx
 'use client'
 
 import { useParams, useRouter } from 'next/navigation'
 import Image from 'next/image'
 import { Button } from '@/components/ui/button'
-import { ArrowLeftIcon } from '@radix-ui/react-icons'
 import { Card, CardContent } from '@/components/ui/Card'
 import { DepositWithdraw } from '@/components/deposit/deposit-withdraw'
 import { useMemo } from 'react'
@@ -18,7 +18,7 @@ import {
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
-} from "@/components/ui/tooltip"
+} from '@/components/ui/tooltip'
 
 // Accept both canonical and alias slugs, normalize for lookups
 const CANONICAL: Record<string, 'USDC' | 'USDT'> = {
@@ -50,8 +50,8 @@ const networkIcons: Record<string, string> = {
 
 // Protocol icon mapping
 const protocolIcons: Record<string, string> = {
-  'Morpho Blue': '/protocols/morpho-icon.png', // Added this key
-  Morpho: '/protocols/morpho-icon.png', // Keep as fallback
+  'Morpho Blue': '/protocols/morpho-icon.png',
+  Morpho: '/protocols/morpho-icon.png',
 }
 
 // Normalize for display parity with YieldRow (underlying → canonical)
@@ -64,7 +64,9 @@ const DISPLAY_TOKEN: Record<string, string> = {
 }
 
 // Only Lisk + Morpho Blue + (USDC/USDT)
-const HARD_FILTER = (y: Pick<YieldSnapshot, 'chain' | 'protocolKey' | 'token'>) =>
+const HARD_FILTER = (
+  y: Pick<YieldSnapshot, 'chain' | 'protocolKey' | 'token'>,
+) =>
   y.chain === 'lisk' &&
   y.protocolKey === 'morpho-blue' &&
   (y.token === 'USDC' || y.token === 'USDT')
@@ -89,20 +91,22 @@ export default function VaultDetailPage() {
     if (!yields || !vaultCanonical) return []
     const filtered = yields.filter(HARD_FILTER)
     const forThisVault = filtered.filter(
-      (s) => (DISPLAY_TOKEN[s.token] ?? s.token) === vaultCanonical
+      (s) => (DISPLAY_TOKEN[s.token] ?? s.token) === vaultCanonical,
     )
     return forThisVault.map((s) => ({
       vault: DISPLAY_TOKEN[s.token] ?? s.token, // canonical view (USDC/USDT)
       network: 'Lisk',
       protocol: 'Morpho Blue',
       apy: (Number(s.apy) || 0).toFixed(2),
-      tvl: Number.isFinite(s.tvlUSD) ? Math.round(s.tvlUSD).toLocaleString() : '0',
+      tvl: Number.isFinite(s.tvlUSD)
+        ? Math.round(s.tvlUSD).toLocaleString()
+        : '0',
     }))
   }, [yields, vaultCanonical])
 
   const primaryVariant = vaultVariants[0] // we only have Lisk/Morpho for now
 
-  // User shares: on Morpho Lisk, the share token is 18d; map header label to underlying
+  // User shares: for USDCe/USDT0 we are using sVault shares (6 decimals) on OP
   const userShares = useMemo(() => {
     const positions = (positionsRaw ?? []) as any[]
 
@@ -111,22 +115,23 @@ export default function VaultDetailPage() {
       vaultSlugKey === 'USDT0' || vaultSlugKey === 'USDCe'
         ? vaultSlugKey
         : vaultCanonical === 'USDC'
-          ? 'USDCe'
-          : vaultCanonical === 'USDT'
-            ? 'USDT0'
-            : vaultSlugKey
+        ? 'USDCe'
+        : vaultCanonical === 'USDT'
+        ? 'USDT0'
+        : vaultSlugKey
 
     const pos = positions.find(
       (p) =>
         p?.protocol === 'Morpho Blue' &&
         String(p?.chain).toLowerCase() === 'lisk' &&
-        String(p?.token) === morphoToken
+        String(p?.token) === morphoToken,
     )
     return (pos?.amount ?? 0n) as bigint
   }, [positionsRaw, vaultCanonical, vaultSlugKey])
 
+  // 🔢 sVault shares & WETH shares are treated as 6-decimal units
   const userSharesHuman = useMemo(() => {
-    const num = Number(formatUnits(userShares, 18))
+    const num = Number(formatUnits(userShares, 6))
     return Number.isFinite(num) ? num : 0
   }, [userShares])
 
@@ -135,7 +140,7 @@ export default function VaultDetailPage() {
     (s) =>
       s.chain === 'lisk' &&
       s.protocolKey === 'morpho-blue' &&
-      (DISPLAY_TOKEN[s.token] ?? s.token) === vaultCanonical
+      (DISPLAY_TOKEN[s.token] ?? s.token) === vaultCanonical,
   )
 
   // ── Only rendering branches below this line, no new hooks ──
@@ -170,13 +175,17 @@ export default function VaultDetailPage() {
 
   return (
     <TooltipProvider>
-      <div className="min-h-[calc(100vh-3.5rem)] bg-[#F9FAFB] p-4 md:p-6">
+      <div className="min-h=[calc(100vh-3.5rem)] bg-[#F9FAFB] p-4 md:p-6">
         <div className="max-w-6xl mx-auto">
           {/* Header with back button */}
           <div className="mb-6">
             <div className="flex items-center gap-3 md:gap-4">
               <Image
-                src={tokenIcons[headerLabel] || tokenIcons[vaultCanonical] || '/tokens/usdc-icon.png'}
+                src={
+                  tokenIcons[headerLabel] ||
+                  tokenIcons[vaultCanonical] ||
+                  '/tokens/usdc-icon.png'
+                }
                 alt={headerLabel}
                 width={32}
                 height={32}
@@ -184,7 +193,8 @@ export default function VaultDetailPage() {
               />
               <div>
                 <h1 className="text-xl md:text-2xl  font-semibold">
-                  Re7 {headerLabel} <span className='text-[#9CA3AF]'>Vault</span>
+                  Re7 {headerLabel}{' '}
+                  <span className="text-[#9CA3AF]">Vault</span>
                 </h1>
               </div>
             </div>
@@ -210,14 +220,20 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">The blockchain network where this vault operates. Currently only Lisk network is supported.</p>
+                            <p className="max-w-xs">
+                              The blockchain network where this vault operates.
+                              Currently only Lisk network is supported.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
                       <div className="flex items-center gap-3">
                         <div className="w-[24px] h-[24px] relative rounded-md overflow-hidden">
                           <Image
-                            src={networkIcons[primaryVariant.network] || '/networks/default.svg'}
+                            src={
+                              networkIcons[primaryVariant.network] ||
+                              '/networks/default.svg'
+                            }
                             alt={primaryVariant.network}
                             width={24}
                             height={24}
@@ -241,21 +257,29 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">The DeFi protocol used for yield generation. This vault uses Morpho Blue for decentralized lending.</p>
+                            <p className="max-w-xs">
+                              The DeFi protocol used for yield generation. This
+                              vault uses Morpho Blue for decentralized lending.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
                       <div className="flex items-center gap-3">
                         <div className="w-[24px] h-[24px] relative rounded-md overflow-hidden">
                           <Image
-                            src={protocolIcons[primaryVariant.protocol] || '/protocols/default.svg'}
+                            src={
+                              protocolIcons[primaryVariant.protocol] ||
+                              '/protocols/default.svg'
+                            }
                             alt={primaryVariant.protocol}
                             width={24}
                             height={24}
                             className="rounded-none"
                           />
                         </div>
-                        <p className="font-semibold">{primaryVariant.protocol}</p>
+                        <p className="font-semibold">
+                          {primaryVariant.protocol}
+                        </p>
                       </div>
                     </CardContent>
                   </Card>
@@ -272,14 +296,25 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">Total Value Locked across all variants of this vault. Represents the sum of all deposits from all users.</p>
+                            <p className="max-w-xs">
+                              Total Value Locked across all variants of this
+                              vault. Represents the sum of all deposits from all
+                              users.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
                       <p className="text-2xl font-semibold">
                         $
                         {vaultVariants
-                          .reduce((sum, v) => sum + Number((v.tvl || '0').toString().replace(/,/g, '')), 0)
+                          .reduce(
+                            (sum, v) =>
+                              sum +
+                              Number(
+                                (v.tvl || '0').toString().replace(/,/g, ''),
+                              ),
+                            0,
+                          )
                           .toLocaleString()}
                       </p>
                     </CardContent>
@@ -297,14 +332,20 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">Annual Percentage Yield based on current rates. This is an estimate and may fluctuate based on market conditions.</p>
+                            <p className="max-w-xs">
+                              Annual Percentage Yield based on current rates.
+                              This is an estimate and may fluctuate based on
+                              market conditions.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
                       <p className="text-2xl font-semibold">
                         {(
-                          vaultVariants.reduce((sum, v) => sum + Number(v.apy || 0), 0) /
-                          (vaultVariants.length || 1)
+                          vaultVariants.reduce(
+                            (sum, v) => sum + Number(v.apy || 0),
+                            0,
+                          ) / (vaultVariants.length || 1)
                         ).toFixed(2)}
                         %
                       </p>
@@ -327,12 +368,15 @@ export default function VaultDetailPage() {
                           </span>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p className="max-w-xs">Your personal deposit amount in this specific vault. Does not include your deposits in other vaults.</p>
+                          <p className="max-w-xs">
+                            Your personal deposit amount in this specific vault.
+                            Does not include your deposits in other vaults.
+                          </p>
                         </TooltipContent>
                       </Tooltip>
                     </p>
                     <p className="text-2xl font-semibold text-left">
-                      ${' '}
+                      $
                       {userSharesHuman.toLocaleString(undefined, {
                         maximumFractionDigits: 2,
                       })}
@@ -344,7 +388,9 @@ export default function VaultDetailPage() {
 
             {/* Right Column - Deposit/Withdraw */}
             <div className="lg:sticky lg:top-6 h-fit">
-              {snapCandidate && <DepositWithdraw initialTab="deposit" snap={snapCandidate} />}
+              {snapCandidate && (
+                <DepositWithdraw initialTab="deposit" snap={snapCandidate} />
+              )}
             </div>
           </div>
         </div>
