@@ -1,0 +1,93 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model DepositIntent {
+  id              String   @id @default(cuid())
+
+  // ── Idempotency key from UI ────────────────────────────────
+  refId           String   @unique
+
+  // ── Signer / intent core ───────────────────────────────────
+  user            String
+  adapterKey      String?
+  asset           String
+  amount          String
+  minAmount       String
+  deadline        String
+  nonce           String
+
+  // ── Replay resistance & audit ──────────────────────────────
+  salt            String                   // bytes32 hex as string
+  digest          String   @unique         // hashTypedData digest (0x…)
+  signature       String   @unique         // ECDSA signature (0x…)
+  consumedAt      DateTime?                // set when mint completes
+
+  // ── Routing telemetry / invariants ─────────────────────────
+  status          String
+  fromChainId     Int?
+  fromTxHash      String?  @unique
+  toChainId       Int?
+  toTxHash        String?                    // partial-unique via SQL migration
+  toAddress       String?
+  toTokenAddress  String?
+  toTokenSymbol   String?
+
+  // ── Execution bookkeeping ─────────────────────────────────
+  bridgedAmount   String?
+  depositTxHash   String?                    // partial-unique via SQL migration
+  mintTxHash      String?                    // partial-unique via SQL migration
+  error           String?
+
+  // 🔒 single-flight lease (owner + expiry) — used by /finish
+  processingOwner      String?  @db.VarChar(64)
+  processingLeaseUntil DateTime?
+
+  // ── Misc ───────────────────────────────────────────────────
+  intentToken     String?        // short-lived secret returned by create-intent
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([user])
+  @@index([status, updatedAt])   // helps finisher & monitoring
+  @@index([processingLeaseUntil])
+}
+
+model WithdrawIntent {
+  id            String   @id @default(cuid())
+
+  refId         String   @unique
+  user          String
+  amountShares  String
+  dstChainId    Int
+  dstToken      String
+  minAmountOut  String
+  deadline      String
+  nonce         String
+  status        String   @default("PENDING")
+
+  redeemTxHash  String?   // add unique via SQL migration
+  fromTxHash    String?   // add unique via SQL migration
+  toTxHash      String?   // add unique via SQL migration
+  amountOut     String?
+  burnTxHash    String?   // add unique via SQL migration
+
+  error         String?
+
+  // 🔒 single-flight lock
+  lockedBy      String?   @db.VarChar(66)
+  lockedAt      DateTime?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([user])
+  @@unique([user, nonce])
+}

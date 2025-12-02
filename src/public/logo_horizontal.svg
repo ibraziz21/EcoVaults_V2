@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 2676 517.84">
+  <defs>
+    <style>
+      .cls-1 {
+        font-family: Unbounded-Black, Unbounded;
+        font-size: 212.28px;
+        font-variation-settings: 'wght' 900;
+        font-weight: 800;
+      }
+
+      .cls-2 {
+        isolation: isolate;
+      }
+
+      .cls-3 {
+        letter-spacing: -.07em;
+      }
+
+      .cls-4 {
+        fill: url(#linear-gradient);
+        mix-blend-mode: overlay;
+      }
+
+      .cls-5 {
+        fill: #038293;
+      }
+
+      .cls-6 {
+        fill: #ff0420;
+      }
+
+      .cls-7 {
+        letter-spacing: 0em;
+      }
+    </style>
+    <linearGradient id="linear-gradient" x1="239.63" y1="293.01" x2="167.45" y2="271.26" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset="1" stop-color="#f7f7f7" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <g class="cls-2">
+    <g id="Layer_2" data-name="Layer 2">
+      <g id="Layer_1-2" data-name="Layer 1">
+        <text class="cls-1" transform="translate(591.17 410.44)"><tspan x="0" y="0">SU</tspan><tspan class="cls-7" x="373.41" y="0">P</tspan><tspan x="550.03" y="0">E</tspan><tspan class="cls-3" x="722.4" y="0">R</tspan><tspan x="893.5" y="0">YIELD - R</tspan></text>
+        <g>
+          <path class="cls-5" d="m449.28,389.38c3.34-1.24,6.6-2.59,9.78-4.05,21.22-9.75,37.73-23.5,49.52-41.26,11.79-17.76,17.69-38.28,17.69-61.54s-5.9-44.64-17.69-62.25c-11.79-17.61-28.3-31.36-49.52-41.26-21.22-9.9-45.98-14.86-74.28-14.86h-202.27c-10.7,0-19.37,8.67-19.37,19.37v334.32h121.67v-117.9h0c22.65,0,43.83,11.2,56.58,29.92l59.9,87.98h139.12l-91.13-128.46Zm-149-139.87h102.72v50.13c0,8.65-7.01,15.66-15.66,15.66h-102.53v-50.32c0-8.54,6.92-15.47,15.47-15.47Z"/>
+          <path class="cls-6" d="m146.95.04v127.66c0,10.66-8.64,19.3-19.3,19.3H0c18.3-4.8,61.38-18.76,98.66-58.84C130.12,54.33,142.18,18.3,146.95.04Z"/>
+          <path class="cls-6" d="m163.81,0v127.05c0,10.99,8.91,19.9,19.9,19.9h127.05c-18.3-4.8-61.38-18.76-98.66-58.84C180.65,54.29,168.59,18.26,163.81,0Z"/>
+          <path class="cls-6" d="m127.15,164.34c10.94,0,19.81,8.87,19.81,19.81v237.36c.52-22.88,1.7-164.02-96.79-232.43-13.05-9.06-29.54-18.03-50.17-24.74h127.15Z"/>
+          <path class="cls-4" d="m182.77,163.66c-10.57,0-19.14,8.57-19.14,19.14v238.04c-.52-22.88-1.7-164.02,96.79-232.43,13.05-9.06,29.54-18.03,50.17-24.74h-127.82Z"/>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,25 @@
+[
+    {
+      "type": "function",
+      "name": "mint",
+      "stateMutability": "nonpayable",
+      "inputs": [
+        { "name": "mintAmount", "type": "uint256" }
+      ],
+      "outputs": [
+        { "name": "", "type": "uint256" }
+      ]
+    },
+    {
+      "type": "function",
+      "name": "redeem",
+      "stateMutability": "nonpayable",
+      "inputs": [
+        { "name": "redeemTokens", "type": "uint256" }
+      ],
+      "outputs": [
+        { "name": "", "type": "uint256" }
+      ]
+    }
+  ]
+  
