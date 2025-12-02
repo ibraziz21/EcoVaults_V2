@@ -2,7 +2,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { optimism, base, lisk as liskChain } from 'viem/chains'
+import { lisk as liskChain } from 'viem/chains'
 import type { Address } from 'viem'
 import { useAccount, useWalletClient } from 'wagmi'
 import { Button } from '@/components/ui/button'
@@ -95,7 +95,7 @@ export default function WithdrawModal({ open, onClose, snap, shares }: Props) {
   const { address } = useAccount()
   const { data: walletClient } = useWalletClient()
 
-  const [dest, setDest] = useState<'lisk' | 'optimism' | 'base'>('lisk')
+  const [dest, setDest] = useState<'lisk' | 'optimism'>('lisk')
   const [submitting, setSubmitting] = useState(false)
   const [step, setStep] = useState<VisualStep>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -107,13 +107,13 @@ export default function WithdrawModal({ open, onClose, snap, shares }: Props) {
 
   const destTokenSymbol = useMemo(() => {
     if (dest === 'lisk') return snap.token // USDCe | USDT0
-    return snap.token === 'USDT0' ? 'USDT' : 'USDC' // bridge mapping
+    // Optimism mapping
+    return snap.token === 'USDT0' ? 'USDT' : 'USDC'
   }, [dest, snap.token])
 
   const destBadge = useMemo(() => {
     if (dest === 'lisk') return `${snap.token} to you (Lisk)`
-    if (dest === 'optimism') return `${destTokenSymbol} to you (Optimism)`
-    return `${destTokenSymbol} to you (Base)`
+    return `${destTokenSymbol} to you (Optimism)`
   }, [dest, destTokenSymbol, snap.token])
 
   useEffect(() => {
@@ -144,7 +144,7 @@ export default function WithdrawModal({ open, onClose, snap, shares }: Props) {
         <div className="mt-2 flex items-center justify-between rounded-lg border p-2">
           <span className="text-xs text-muted-foreground">Receive on</span>
           <div className="inline-flex rounded-md bg-gray-100 p-1">
-            {(['lisk', 'optimism', 'base'] as const).map((d) => (
+            {(['lisk', 'optimism'] as const).map((d) => (
               <button
                 key={d}
                 type="button"
@@ -264,26 +264,24 @@ export default function WithdrawModal({ open, onClose, snap, shares }: Props) {
                     return
                   }
 
-                  // 3) Bridge to chosen chain (USDCe->USDC, USDT0->USDT)
+                  // 3) Bridge to Optimism (USDCe->USDC, USDT0->USDT)
                   setStep('bridging')
-                  const toChain = dest === 'optimism' ? 'optimism' : 'base' as const
-                  const sourceToken = snap.token === 'USDT0' ? 'USDT' : 'USDC' // Li.Fi input mapper when leaving Lisk
-                  const destToken = snap.token === 'USDT0' ? 'USDT' : 'USDC'
+                  const toChain = 'optimism' as const
 
                   // Re-read actual balance to bridge all newly received underlying (or use a %)
                   const afterBal = await readWalletBalanceLisk(underlyingOnLisk as `0x${string}`, address as `0x${string}`)
                   const delta = afterBal - pre
                   if (delta <= 0n) throw new Error('No underlying received from withdraw')
 
-                    await bridgeWithdrawal({
-                      srcVaultToken: snap.token,                   // 'USDCe' | 'USDT0' (or 'WETH')
-                      destToken:     snap.token === 'USDT0' ? 'USDT'
-                                    : snap.token === 'USDCe' ? 'USDC'
-                                    : 'WETH',
-                      amount:        delta,                // bigint
-                      to:            toChain,
-                      walletClient,
-                    })
+                  await bridgeWithdrawal({
+                    srcVaultToken: snap.token,                   // 'USDCe' | 'USDT0' (or 'WETH')
+                    destToken:     snap.token === 'USDT0' ? 'USDT'
+                                  : snap.token === 'USDCe' ? 'USDC'
+                                  : 'WETH',
+                    amount:        delta,                        // bigint
+                    to:            toChain,
+                    walletClient,
+                  })
 
                   setStep('done')
                 } catch (e: any) {

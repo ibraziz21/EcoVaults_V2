@@ -1,12 +1,13 @@
 // src/app/api/create-intent/route.ts
+'use server'
 import 'server-only'
-export const runtime = 'nodejs'
 
 import { NextResponse } from 'next/server'
 import { verifyTypedData, hashTypedData } from 'viem'
-import { optimism } from 'viem/chains'
+import { optimism, lisk as liskChain } from 'viem/chains'
 import { prisma } from '@/lib/db'
 import { randomUUID } from 'node:crypto'
+import { registryCreateIntent } from '@/lib/intentRegistry'
 
 /* ──────────────────────────────────────────────────────────── */
 /* Types & helpers                                              */
@@ -142,14 +143,11 @@ export async function POST(req: Request) {
           { signature: signature as any },
         ] as any,
       },
-      select: { refId: true, status: true },
+      select: { refId: true },
     })
     .catch(() => null)
 
-  if (existed) {
-    // Another intent with same digest/signature already exists
-    return bad('intent already recorded', 409)
-  }
+  if (existed) return bad('intent already recorded', 409)
 
   // 4) Create the persistent record (PENDING)
   const data: any = {
@@ -165,59 +163,42 @@ export async function POST(req: Request) {
     digest,
     signature,
     status: 'PENDING',
-    fromChainId: optimism.id,   // 🔒 user side is always Optimism now
+    fromChainId: optimism.id,    // 🔒 user side is always Optimism now
+    toChainId: liskChain.id,     // 🔒 destination is Lisk in this build
     // srcToken: intent.srcToken ?? null, // uncomment if added to Prisma
   }
 
   const intentToken = randomUUID()
 
-  try {
-    const row = await prisma.depositIntent.create({
+  const row = await prisma.depositIntent
+    .create({
       data: {
         ...data,
         intentToken,
       },
     })
+    .catch((e) => {
+      console.error('[create-intent] create failed:', e)
+      return null
+    })
 
-    return json({ ok: true, refId: row.refId, digest, intentToken })
-  } catch (e: any) {
-    console.error('[create-intent] create failed:', e)
+  if (!row) return bad('failed to persist intent', 500)
 
-    // Prisma unique-constraint race (e.g. two rapid clicks)
-    if (e?.code === 'P2002') {
-      try {
-        const conflict = await prisma.depositIntent.findFirst({
-          where: {
-            OR: [
-              { refId: intent.refId },
-              { digest: digest as any },
-              { signature: signature as any },
-            ] as any,
-          },
-        })
-
-        if (conflict) {
-          // If the conflicting row is the same logical intent & still pending, treat as idempotent
-          if (
-            conflict.digest?.toLowerCase?.() === digest.toLowerCase() &&
-            conflict.signature?.toLowerCase?.() === signature.toLowerCase() &&
-            conflict.status === 'PENDING'
-          ) {
-            return json({ ok: true, refId: conflict.refId, digest })
-          }
-
-          return bad('intent already exists (race)', 409)
-        }
-      } catch (re) {
-        console.error('[create-intent] follow-up lookup after P2002 failed:', re)
-      }
+  // 5) Mirror to onchain registry (best-effort, non-fatal)
+  try {
+    if (row.asset) {
+      await registryCreateIntent({
+        refId: row.refId as `0x${string}`,
+        user: row.user as `0x${string}`,
+        asset: row.asset as `0x${string}`,
+        amount: BigInt(row.amount),
+        fromChainId: row.fromChainId ?? optimism.id,
+        toChainId: row.toChainId ?? liskChain.id,
+      })
     }
-
-    // Fallback: bubble the message so you see the actual DB problem in the client
-    const msg =
-      e?.message ||
-      e?.meta?.cause ||
-      'failed to persist intent'
-    return bad(msg, 500)
+  } catch (e: any) {
+    console.warn('[create-intent] registryCreateIntent failed (non-fatal):', e?.message || e)
   }
+
+  return json({ ok: true, refId: row.refId, digest, intentToken })
 }

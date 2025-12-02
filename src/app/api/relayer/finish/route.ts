@@ -26,6 +26,12 @@ import {
   ADAPTER_KEYS,
 } from '@/lib/constants'
 import { randomUUID } from 'node:crypto'
+import {
+  registryMarkBridged,
+  registryMarkDeposited,
+  registryMarkMinted,
+  registryMarkFailed,
+} from '@/lib/intentRegistry'
 
 // ---------- config / env ----------
 const LIFI_STATUS_URL = 'https://li.quest/v1/status'
@@ -347,32 +353,11 @@ export async function POST(req: Request) {
       intent = await prisma.depositIntent.update({ where: { refId }, data: patch })
     }
 
-  // If still no source tx, mark as WAITING_ROUTE and exit
-if (!intent.fromTxHash) {
-  console.log('[finish] no fromTxHash yet, marking WAITING_ROUTE')
-
-  if (intent.status !== 'WAITING_ROUTE') {
-    await prisma.depositIntent.update({
-      where: { refId },
-      data: {
-        status: 'WAITING_ROUTE',
-        updatedAt: new Date(),
-      },
-    }).catch((e) => {
-      console.warn('[finish] failed to mark WAITING_ROUTE:', e)
-    })
-  }
-
-  return json(
-    {
-      ok: true,
-      waiting: true,
-      status: 'WAITING_ROUTE',
-      reason: 'missing fromTxHash – call finish again once you have the bridge tx hash',
-    },
-    202,
-  )
-}
+    // If still no source tx, move to WAITING_ROUTE and exit
+    if (!intent.fromTxHash) {
+      await advanceIdempotent(refId, 'PENDING', 'WAITING_ROUTE')
+      return json({ ok: true, waiting: true }, 202)
+    }
 
     // We have a txHash; bridge should be in flight
     await advanceIdempotent(refId, 'WAITING_ROUTE', 'BRIDGE_IN_FLIGHT')
@@ -445,6 +430,17 @@ if (!intent.fromTxHash) {
       bridgedAmount: bridgedAmount.toString(),
     })
 
+    // Mirror bridge info onchain (best-effort)
+    try {
+      await registryMarkBridged({
+        refId: refId as `0x${string}`,
+        bridgedAmount,
+        toTxHash: toTxHash as `0x${string}` ?? undefined,
+      })
+    } catch (e: any) {
+      console.warn('[finish] registryMarkBridged failed (non-fatal):', e?.message || e)
+    }
+
     const amt = bridgedAmount
     if (amt <= 0n) throw new Error('Zero bridged amount')
 
@@ -488,6 +484,16 @@ if (!intent.fromTxHash) {
       await advanceIdempotent(refId, 'DEPOSITING', 'DEPOSITED', {
         depositTxHash: depositTx,
       })
+
+      // Mirror deposit onchain (best-effort)
+      try {
+        await registryMarkDeposited({
+          refId: refId as `0x${string}`,
+          depositTxHash: depositTx as `0x${string}`,
+        })
+      } catch (e: any) {
+        console.warn('[finish] registryMarkDeposited failed (non-fatal):', e?.message || e)
+      }
     } else {
       console.log('[finish] deposit already done; skipping')
     }
@@ -545,6 +551,17 @@ if (!intent.fromTxHash) {
             .catch(() => {})
         }
       }
+
+      // Mirror mint onchain (best-effort)
+      try {
+        await registryMarkMinted({
+          refId: refId as `0x${string}`,
+          mintTxHash: mintTx as `0x${string}`,
+        })
+      } catch (e: any) {
+        console.warn('[finish] registryMarkMinted failed (non-fatal):', e?.message || e)
+      }
+
       mintedOk = true
     }
 
@@ -561,6 +578,16 @@ if (!intent.fromTxHash) {
             where: { refId: refIdForCatch },
             data: { status: 'FAILED', error: e?.message || String(e) },
           })
+
+          // Mirror failure onchain (best-effort)
+          try {
+            await registryMarkFailed({
+              refId: refIdForCatch as `0x${string}`,
+              reason: e?.message || 'finish failed',
+            })
+          } catch (regErr: any) {
+            console.warn('[finish] registryMarkFailed failed (non-fatal):', regErr?.message || regErr)
+          }
         }
       }
     } catch {}

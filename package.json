@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "postinstall": "prisma generate"
+    "postinstall": "prisma generate",
+     "sweep:intents": "APP_BASE_URL=http://localhost:3000 tsx scripts/sweep-intents.ts"
   },
   "dependencies": {
     "@across-protocol/app-sdk": "^0.3.0",
