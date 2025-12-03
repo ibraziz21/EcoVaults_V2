@@ -6,10 +6,7 @@ import MyPositionsTable from ".";
 import { MyPositionsColumns, type Position as TableRow } from "./columns";
 import { usePositions } from "@/hooks/usePositions";
 import { useYields, type YieldSnapshot } from "@/hooks/useYields";
-import {
-  type Position as BasePosition,
-  DUST_SHARES,
-} from "@/lib/positions";
+import { type Position as BasePosition, DUST_SHARES } from "@/lib/positions";
 import { MORPHO_POOLS, TokenAddresses } from "@/lib/constants";
 
 type EvmChain = "lisk";
@@ -18,9 +15,9 @@ type MorphoToken = "USDCe" | "USDT0" | "WETH";
 type PositionLike =
   | BasePosition
   | {
-      protocol: "Morpho Blue";
-      chain: Extract<EvmChain, "lisk">;
-      token: MorphoToken;
+      protocol: "Morpho Blue" | string;
+      chain: Extract<EvmChain, "lisk"> | string;
+      token: MorphoToken | string;
       amount: bigint;
     };
 
@@ -118,6 +115,60 @@ function findSnapshotForPosition(
   return fallback;
 }
 
+/**
+ * Prefer sVault balances (OP receipt shares) for deposits,
+ * falling back to Lisk Morpho shares if we can't find them.
+ * This mirrors the “use sVault balances” approach we used elsewhere.
+ */
+export function pickEffectiveSharesForToken(
+  allPositions: PositionLike[],
+  token: MorphoToken,
+  morphoShares: bigint
+): { shares: bigint; decimals: number } {
+  const tokenUpper = token.toUpperCase();
+
+  // Heuristic: look for OP-side vault / rewards / sVault style positions
+  // whose token symbol contains the base token name (USDCe → USDC, USDT0 → USDT, etc.)
+  const base = tokenUpper === "USDCe".toUpperCase() ? "USDC" :
+               tokenUpper === "USDT0" ? "USDT" :
+               tokenUpper;
+
+  const sVaultCandidate = allPositions.filter((p) => {
+    const proto = String(p.protocol ?? "").toLowerCase();
+    const chain = String(p.chain ?? "").toLowerCase();
+    const sym = String(p.token ?? "").toUpperCase();
+
+    const looksLikeSVaultProtocol =
+      proto.includes("vault") ||
+      proto.includes("svault") ||
+      proto.includes("rewards");
+
+    const sameFamily =
+      sym.includes(base) ||
+      sym === tokenUpper;
+
+    const isOp =
+      chain === "optimism";
+
+    return looksLikeSVaultProtocol && sameFamily && isOp;
+  });
+
+  const sVaultShares = sVaultCandidate.reduce<bigint>((acc, p) => {
+    const amt = (p as any).amount as bigint | undefined;
+    return acc + (typeof amt === "bigint" ? amt : 0n);
+  }, 0n);
+
+  // If we found sVault shares, treat those as canonical;
+  // otherwise, fall back to the Morpho Lisk shares.
+  const chosen = sVaultShares > 0n ? sVaultShares : morphoShares;
+
+  const decimals =
+    TOKEN_DECIMALS[token] ??
+    (token === "USDCe" || token === "USDT0" ? 6 : 18);
+
+  return { shares: chosen, decimals };
+}
+
 interface MyPositionsProps {
   networkFilter?: string[];
   protocolFilter?: string[];
@@ -145,7 +196,6 @@ const MyPositions: React.FC<MyPositionsProps> = ({
       const amt = (p as any).amount as bigint | undefined;
       if (typeof amt !== "bigint") return false;
 
-      // same dust cutoff as lib/positions
       return amt > DUST_SHARES;
     });
   }, [positions]);
@@ -153,16 +203,23 @@ const MyPositions: React.FC<MyPositionsProps> = ({
   const tableData: TableRow[] = useMemo(() => {
     let filtered = positionsForMorpho.map((p) => {
       const snap = findSnapshotForPosition(p, snapshots);
-      const depositsHuman = formatAmountBigint(p.amount ?? 0n, 18);
+      const tokenSymbol = String(p.token) as MorphoToken;
 
-      const tokenSymbol = String(p.token); // "USDCe" | "USDT0" | "WETH"
+      const effective = pickEffectiveSharesForToken(
+        positions,
+        tokenSymbol,
+        (p as any).amount ?? 0n
+      );
+
+      const depositsHuman = formatAmountBigint(
+        effective.shares,
+        effective.decimals
+      );
 
       return {
-        // Display text on the row
-        vault: normalizeDisplayVault(tokenSymbol), // e.g. "Re7 USDC.e"
-        // Canonical route key for URLs
-        routeKey: tokenSymbol, // used by MyPositionsTable for /vaults/USDCe
-        network: CHAIN_LABEL[p.chain],
+        vault: normalizeDisplayVault(tokenSymbol),
+        routeKey: tokenSymbol,
+        network: CHAIN_LABEL["lisk"],
         deposits: depositsHuman,
         protocol: "Morpho Blue",
         apy: formatPercent(snap.apy),
@@ -174,11 +231,13 @@ const MyPositions: React.FC<MyPositionsProps> = ({
     }
 
     if (protocolFilter && !protocolFilter.includes("all")) {
-      filtered = filtered.filter((row) => protocolFilter.includes(row.protocol));
+      filtered = filtered.filter((row) =>
+        protocolFilter.includes(row.protocol)
+      );
     }
 
     return filtered;
-  }, [positionsForMorpho, snapshots, networkFilter, protocolFilter]);
+  }, [positionsForMorpho, snapshots, networkFilter, protocolFilter, positions]);
 
   if (positionsLoading || yieldsLoading) {
     return (

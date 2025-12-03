@@ -1,5 +1,7 @@
+// src/components/MyPositions/columns.tsx
 import { ColumnDef } from "@tanstack/react-table";
 import Image from "next/image";
+import { DataTableColumnHeader } from "../data-table-header";
 
 export type Position = {
   vault: string;
@@ -7,11 +9,8 @@ export type Position = {
   deposits: string;
   protocol: string;
   apy: string;
-  routeKey?: string; // 👈 add this
+  routeKey?: string;
 };
-
-
-import { DataTableColumnHeader } from "../data-table-header";
 
 // Token icon mapping (reusing from ClaimRewards)
 const tokenIcons: Record<string, string> = {

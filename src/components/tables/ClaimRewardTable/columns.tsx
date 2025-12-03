@@ -26,7 +26,7 @@ const networkIcons: Record<string, string> = {
 
 const sourceIcons: Record<string, string> = {
   "Aave V3": "/protocols/aave.png",
-  "Morpho Blue": "/protocols/morpho.png",
+  "Morpho Blue": "/protocols/morpho-icon.png",
   Compound: "/protocols/compound.png",
   GMX: "/protocols/gmx.png",
   Merkl: "/protocols/merkle.png",
@@ -48,7 +48,7 @@ export const ClaimableRewardColumns: ColumnDef<ClaimableReward>[] = [
     header: ({ column }) => <DataTableColumnHeader column={column} title="Network" />,
     cell: ({ row }) => {
       const network = row.getValue("network") as string;
-      const iconPath = networkIcons[network] || "/networks/default.svg";
+      const iconPath = networkIcons[network] || "/networks/optimism.png";
       return (
         <div className="flex items-center justify-center gap-2">
           <div className="relative h-6 w-6 rounded-md overflow-hidden">
@@ -72,7 +72,7 @@ export const ClaimableRewardColumns: ColumnDef<ClaimableReward>[] = [
     header: ({ column }) => <DataTableColumnHeader column={column} title="Source" />,
     cell: ({ row }) => {
       const source = row.getValue("source") as string;
-      const iconPath = sourceIcons[source] || "/protocols/default.svg";
+      const iconPath = sourceIcons[source] || "/protocols/morpho-icon.png";
       return (
         <div className="flex items-center justify-center gap-2">
           <div className="relative h-6 w-6 rounded-md overflow-hidden">

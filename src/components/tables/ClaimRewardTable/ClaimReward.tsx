@@ -69,8 +69,8 @@ const ClaimRewards: React.FC = () => {
       const human = Number(formatUnits(earned, 6)); // both USDC/USDT are 6d
 
       rows.push({
-        network: "Optimism",
-        source: "Vault rewards",
+        network: "OP Mainnet",
+        source: "Morpho Blue",
         claimable: human.toString(),
         token: symbol,
         __raw: {
