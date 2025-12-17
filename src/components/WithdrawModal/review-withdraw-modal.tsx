@@ -6,7 +6,7 @@ import Image from 'next/image'
 import { X, Check, ExternalLink, AlertCircle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useWalletClient } from 'wagmi'
-import { useAppKit } from '@reown/appkit/react'
+import { useConnect } from 'wagmi'
 import { parseUnits } from 'viem'
 import { optimism } from 'viem/chains'
 import type { YieldSnapshot } from '@/hooks/useYields'
@@ -127,7 +127,19 @@ export const ReviewWithdrawModal: FC<Props> = ({
   user,
 }) => {
   const { data: walletClient } = useWalletClient()
-  const { open: openConnect } = useAppKit()
+  import { useConnect } from 'wagmi'
+
+const { connect, connectors } = useConnect()
+
+function openConnect() {
+  // Prefer Safe when in Safe, otherwise injected, otherwise first available
+  const safeConn = connectors.find((c) => c.id === 'safe')
+  const injectedConn = connectors.find((c) => c.id === 'injected')
+  const connector = safeConn ?? injectedConn ?? connectors[0]
+
+  if (!connector) throw new Error('No wallet connectors available')
+  connect({ connector })
+}
 
   const [step, setStep] = useState<FlowStep>('idle')
   const [err, setErr] = useState<string | null>(null)

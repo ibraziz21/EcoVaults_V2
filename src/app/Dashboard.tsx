@@ -10,7 +10,7 @@ import { TokenAddresses } from '@/lib/constants'
 import { MORPHO_VAULTS } from '@/lib/tvl'
 import ClaimRewards from '@/components/tables/ClaimRewardTable/ClaimReward'
 import MyPositions from '@/components/tables/MyPositionsTable/MyPositions'
-import { useAppKitAccount } from '@reown/appkit/react'
+import { useAccount } from 'wagmi'
 import { ConnectWalletPrompt } from '@/components/ConnectWalletPrompt'
 import { FunnelSimple, ArrowRight, MagnifyingGlassIcon } from '@phosphor-icons/react'
 import { Button } from '@/components/ui/button'
@@ -57,7 +57,7 @@ function toSnapshotFromPosition(p: {
 
 export default function Dashboard() {
   const [depositSnap, setDepositSnap] = useState<YieldSnapshot | null>(null)
-  const { address, isConnected } = useAppKitAccount()
+  const { address, isConnected } = useAccount()
   const { refetch } = useMerklRewards();
   const [selectedNetworks, setSelectedNetworks] = useState<string[]>(['all'])
   const [selectedProtocols, setSelectedProtocols] = useState<string[]>(['all'])

@@ -2,16 +2,17 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useAppKitAccount } from "@reown/appkit/react";
+
 import Vaults from "@/components/tables/VaultsTable/Vaults";
 import MyPositions from "@/components/tables/MyPositionsTable/MyPositions";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { ConnectWalletPrompt } from "@/components/ConnectWalletPrompt";
 import { FunnelSimpleIcon } from "@phosphor-icons/react";
 import { usePositions } from "@/hooks/usePositions";
+import { useAccount } from "wagmi";
 
 export default function PositionsPage() {
-  const { address, isConnected } = useAppKitAccount();
+  const { address, isConnected } = useAccount()
 
   // Multi-select state for filters
   const [selectedNetworks, setSelectedNetworks] = useState<string[]>(["all"]);

@@ -5,7 +5,7 @@ import React, { useMemo, useState } from "react";
 import ClaimRewardTable from ".";
 import { ClaimableRewardColumns, type ClaimableReward } from "./columns";
 
-import { useAppKit } from "@reown/appkit/react";
+import { useAccount, useConnect } from "wagmi";
 import { useWalletClient, useSwitchChain, useChainId } from "wagmi";
 import { optimism } from "viem/chains";
 import type { Address } from "viem";
@@ -32,7 +32,19 @@ type RowRaw = {
 };
 
 const ClaimRewards: React.FC = () => {
-  const { open: openConnect } = useAppKit();
+
+
+  const { connect, connectors } = useConnect()
+  
+  function openConnect() {
+    // Prefer Safe when in Safe, otherwise injected, otherwise first available
+    const safeConn = connectors.find((c) => c.id === 'safe')
+    const injectedConn = connectors.find((c) => c.id === 'injected')
+    const connector = safeConn ?? injectedConn ?? connectors[0]
+  
+    if (!connector) throw new Error('No wallet connectors available')
+    connect({ connector })
+  }
   const { data: wallet, refetch: refetchWalletClient } = useWalletClient();
   const { switchChainAsync } = useSwitchChain();
   const activeChainId = useChainId();

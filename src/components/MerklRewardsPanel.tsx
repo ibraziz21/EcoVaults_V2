@@ -4,8 +4,7 @@
 import { FC, useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { useMerklRewards } from '@/hooks/useMerklRewards'
-import { useAppKit } from '@reown/appkit/react'
-import { useWalletClient, useSwitchChain, useChainId } from 'wagmi'
+import { useWalletClient, useSwitchChain, useChainId, useAccount, useConnect } from 'wagmi'
 import { optimism, base, lisk } from 'viem/chains'
 import type { Address } from 'viem'
 import { formatUnits } from 'viem'
@@ -28,8 +27,19 @@ function explorerTxBaseUrl(chainId: number) {
 }
 
 export const MerklRewardsPanel: FC = () => {
-    const { open: openConnect } = useAppKit()
-    const { data: wallet } = useWalletClient()
+
+
+    const { connect, connectors } = useConnect()
+    
+    function openConnect() {
+      // Prefer Safe when in Safe, otherwise injected, otherwise first available
+      const safeConn = connectors.find((c) => c.id === 'safe')
+      const injectedConn = connectors.find((c) => c.id === 'injected')
+      const connector = safeConn ?? injectedConn ?? connectors[0]
+    
+      if (!connector) throw new Error('No wallet connectors available')
+      connect({ connector })
+    }    const { data: wallet } = useWalletClient()
     const activeChainId = useChainId()
     const { switchChainAsync, isPending: switching } = useSwitchChain()
     const { priceUsdForSymbol, isLoading: pricesLoading } = useUsdPrices()

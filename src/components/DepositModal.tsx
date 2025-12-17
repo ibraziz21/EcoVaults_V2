@@ -27,8 +27,7 @@ import { adapterKeyForSnapshot } from '@/lib/adapters'
 import { TokenAddresses } from '@/lib/constants'
 import { publicOptimism, publicLisk } from '@/lib/clients'
 
-import { useAppKit } from '@reown/appkit/react'
-import { useWalletClient } from 'wagmi'
+import { useWalletClient,useAccount, useConnect } from 'wagmi'
 import { formatUnits, parseUnits } from 'viem'
 import { erc20Abi } from 'viem'
 import {
@@ -140,7 +139,18 @@ interface DepositModalProps {
 type FlowStep = 'idle' | 'bridging' | 'waitingFunds' | 'depositing' | 'success' | 'error'
 
 export const DepositModal: FC<DepositModalProps> = ({ open, onClose, snap }) => {
-  const { open: openConnect } = useAppKit()
+  
+const { connect, connectors } = useConnect()
+
+function openConnect() {
+  // Prefer Safe when in Safe, otherwise injected, otherwise first available
+  const safeConn = connectors.find((c) => c.id === 'safe')
+  const injectedConn = connectors.find((c) => c.id === 'injected')
+  const connector = safeConn ?? injectedConn ?? connectors[0]
+
+  if (!connector) throw new Error('No wallet connectors available')
+  connect({ connector })
+}
   const { data: walletClient } = useWalletClient()
 
   const [amount, setAmount] = useState('')

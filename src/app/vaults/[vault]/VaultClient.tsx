@@ -10,7 +10,8 @@ import { useMemo } from 'react'
 import { useYields, type YieldSnapshot } from '@/hooks/useYields'
 import { usePositions } from '@/hooks/usePositions'
 import { formatUnits } from 'viem'
-import { useAppKitAccount } from '@reown/appkit/react'
+
+import { useAccount } from 'wagmi'
 import { ConnectWalletPrompt } from '@/components/ConnectWalletPrompt'
 import { InfoIcon } from '@phosphor-icons/react'
 import {
@@ -74,7 +75,7 @@ const HARD_FILTER = (
 export default function VaultDetailPage() {
   const params = useParams()
   const router = useRouter()
-  const { address, isConnected } = useAppKitAccount()
+  const { address, isConnected } = useAccount()
 
   // Raw slug from URL (preserve for header/icon); also build a canonical token for queries
   const vaultSlugRaw = ((params.vault as string) || '').toUpperCase()
