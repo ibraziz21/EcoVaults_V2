@@ -12,7 +12,7 @@ import type { YieldSnapshot } from '@/hooks/useYields'
 import { TokenAddresses } from '@/lib/constants'
 import { WithdrawSuccessModal } from './withdraw-success-modal'
 
-import lifilogo from '@/public/logo_lifi_light.png'
+import lifilogo from '@/public/lifi.png'
 import InfoIconModal from '../../../public/info-icon-modal.svg'
 import CheckIconModal from '../../../public/check-icon-modal.svg'
 import AlertIconModal from '../../../public/alert-icon-modal.svg'
@@ -22,7 +22,6 @@ import AlertIconModal from '../../../public/alert-icon-modal.svg'
 /* -------------------------------------------------------------------------- */
 
 type ChainSel = 'optimism'
-
 type FlowStep = 'idle' | 'withdrawing' | 'bridging' | 'success' | 'error'
 
 interface Props {
@@ -48,6 +47,7 @@ const ICON = {
   USDT: '/tokens/usdt-icon.png',
   USDCe: '/tokens/usdc-icon.png',
   USDT0: '/tokens/usdt0-icon.png',
+  WETH: '/tokens/weth.png',
 } as const
 
 const WITHDRAW_TYPES = {
@@ -79,32 +79,47 @@ function fmt(n: number, decimals = 6) {
 }
 
 function opTxUrl(hash: `0x${string}`) {
+  // Your UI uses OP destination; keep OP explorer by default.
   return `https://optimistic.etherscan.io/tx/${hash}`
 }
 
 /**
  * Safe Apps do not support chain switching in the embedded signer.
  * We must sign on OP only; if not on OP, show a clear error.
+ *
+ * NOTE: Some walletClient implementations (wagmi) don't expose request() on all transports.
+ * If chain id is available via walletClient.chain.id, use that first.
  */
 async function ensureOnOptimism(walletClient: any) {
-  const hex = (await walletClient.request({ method: 'eth_chainId' })) as string
-  const chainId = Number.parseInt(hex, 16)
-  if (chainId === optimism.id) return
-
-  try {
-    await walletClient.request({
-      method: 'wallet_switchEthereumChain',
-      params: [{ chainId: `0x${optimism.id.toString(16)}` }],
-    })
-  } catch {
+  const known = walletClient?.chain?.id
+  if (known && known === optimism.id) return
+  if (known && known !== optimism.id) {
     throw new Error('Please switch your wallet to OP Mainnet to continue.')
   }
 
-  const hex2 = (await walletClient.request({ method: 'eth_chainId' })) as string
-  const chainId2 = Number.parseInt(hex2, 16)
-  if (chainId2 !== optimism.id) {
-    throw new Error('Please switch your wallet to OP Mainnet to continue.')
+  // Fallback to direct RPC request for Safe / injected connectors that support it.
+  if (typeof walletClient?.request === 'function') {
+    const hex = (await walletClient.request({ method: 'eth_chainId' })) as string
+    const chainId = Number.parseInt(hex, 16)
+    if (chainId === optimism.id) return
+
+    try {
+      await walletClient.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: `0x${optimism.id.toString(16)}` }],
+      })
+    } catch {
+      throw new Error('Please switch your wallet to OP Mainnet to continue.')
+    }
+
+    const hex2 = (await walletClient.request({ method: 'eth_chainId' })) as string
+    const chainId2 = Number.parseInt(hex2, 16)
+    if (chainId2 !== optimism.id) throw new Error('Please switch your wallet to OP Mainnet to continue.')
+    return
   }
+
+  // If we cannot query chain id, fail safely.
+  throw new Error('Please switch your wallet to OP Mainnet to continue.')
 }
 
 /** Matches the deposit modal so the ETA block never jumps when hint/title changes. */
@@ -150,12 +165,14 @@ export const ReviewWithdrawModal: FC<Props> = ({
 
   const [step, setStep] = useState<FlowStep>('idle')
   const [err, setErr] = useState<string | null>(null)
-
   const [showSuccess, setShowSuccess] = useState(false)
-  const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
 
-  // UI state (ported from Standalone UI semantics)
+  // Relayer state
+  const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
   const [intentOk, setIntentOk] = useState(false)
+
+  // Bridge UI state (submitted vs done)
+  const [bridgeSubmitted, setBridgeSubmitted] = useState(false)
   const [bridgeDone, setBridgeDone] = useState(false)
   const [bridgeTxHash, setBridgeTxHash] = useState<`0x${string}` | null>(null)
 
@@ -164,8 +181,11 @@ export const ReviewWithdrawModal: FC<Props> = ({
     setStep('idle')
     setErr(null)
     setShowSuccess(false)
+
     setCurrentRefId(null)
     setIntentOk(false)
+
+    setBridgeSubmitted(false)
     setBridgeDone(false)
     setBridgeTxHash(null)
   }, [open])
@@ -173,6 +193,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
   const liskToken: 'USDCe' | 'USDT0' = tokenLabelOnLisk(snap.token as 'USDC' | 'USDT')
   const destSymbol: 'USDC' | 'USDT' = liskToken === 'USDT0' ? 'USDT' : 'USDC'
 
+  // Destination token on OP (what user ultimately receives)
   const dstTokenAddr = useMemo(
     () =>
       destSymbol === 'USDT'
@@ -192,6 +213,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
   const isWorking = step === 'withdrawing' || step === 'bridging'
   const disabled = isWorking
 
+  // Conservative minOut basis: prefer UI-provided estimate, fallback to fee math.
   const reminderMinOutDisplay =
     receiveOnDestDisplay && receiveOnDestDisplay > 0 ? receiveOnDestDisplay : netOnDest
 
@@ -199,19 +221,21 @@ export const ReviewWithdrawModal: FC<Props> = ({
     !walletClient
       ? 'Connect wallet'
       : step === 'success'
-      ? 'Done'
-      : step === 'withdrawing'
-      ? 'Withdrawing…'
-      : step === 'bridging'
-      ? 'Bridging…'
-      : step === 'error'
-      ? intentOk
-        ? 'Retry bridge'
-        : 'Try again'
-      : 'Withdraw now'
+        ? 'Done'
+        : step === 'withdrawing'
+          ? 'Withdrawing…'
+          : step === 'bridging'
+            ? bridgeSubmitted
+              ? 'Bridging…'
+              : 'Finalizing…'
+            : step === 'error'
+              ? intentOk
+                ? 'Retry bridge'
+                : 'Try again'
+              : 'Withdraw now'
 
   /* ------------------------------------------------------------------------ */
-  /* Main confirm flow — using withdraw APIs                                  */
+  /* Main confirm flow — OP-sign intent, relayer finishes                      */
   /* ------------------------------------------------------------------------ */
 
   async function handleConfirm() {
@@ -222,9 +246,14 @@ export const ReviewWithdrawModal: FC<Props> = ({
 
     try {
       setErr(null)
+      setShowSuccess(false)
+
+      // reset per-run state
       setIntentOk(false)
+      setBridgeSubmitted(false)
       setBridgeDone(false)
       setBridgeTxHash(null)
+
       setStep('withdrawing')
 
       if (snap.chain !== 'lisk') {
@@ -247,7 +276,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
       const dstChainIdNum = optimism.id
       const deadlineStr = String(deadlineSec)
       const minAmountOutStr = minAmountOutBn.toString()
-      const refId = currentRefId ?? randomRefId()
+      const refId = randomRefId()
 
       const domain = {
         name: 'SuperYLDR',
@@ -303,8 +332,9 @@ export const ReviewWithdrawModal: FC<Props> = ({
       setCurrentRefId(finalRefId)
       setIntentOk(true)
 
-      // Burn → redeem → bridge (idempotent)
+      // Finish (burn/redeem/bridge) via relayer
       setStep('bridging')
+      setBridgeSubmitted(true)
 
       const finishRes = await fetch('/api/withdraw/finish', {
         method: 'POST',
@@ -352,9 +382,14 @@ export const ReviewWithdrawModal: FC<Props> = ({
 
     try {
       setErr(null)
+      setShowSuccess(false)
+
+      setBridgeSubmitted(false)
       setBridgeDone(false)
       setBridgeTxHash(null)
+
       setStep('bridging')
+      setBridgeSubmitted(true)
 
       const finishRes = await fetch('/api/withdraw/finish', {
         method: 'POST',
@@ -414,7 +449,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
 
   const isSigErr = !!err && err.toLowerCase().includes('signature')
 
-  // Sub-step visuals (Standalone-style)
+  // Sub-step visuals
   const withdrawStepActive = step === 'withdrawing'
   const withdrawStepDone = intentOk || step === 'bridging' || step === 'success'
   const withdrawStepError = step === 'error' && !intentOk
@@ -501,8 +536,8 @@ export const ReviewWithdrawModal: FC<Props> = ({
                         ? 'Signature required'
                         : 'Withdrawal intent failed'
                       : withdrawStepDone
-                      ? 'Withdrawal intent signed'
-                      : 'Sign withdrawal intent…'}
+                        ? 'Withdrawal intent signed'
+                        : 'Sign withdrawal intent…'}
                   </div>
                 </div>
               </div>
@@ -575,12 +610,13 @@ export const ReviewWithdrawModal: FC<Props> = ({
                       {bridgeStepError
                         ? 'Bridge failed'
                         : bridgeStepDone
-                        ? 'Bridge transaction confirmed'
-                        : bridgeStepActive
-                        ? 'Bridging…'
-                        : 'Waiting to bridge…'}
+                          ? 'Bridge transaction confirmed'
+                          : bridgeStepActive
+                            ? 'Bridging…'
+                            : 'Waiting to bridge…'}
                     </div>
 
+                    {/* Explorer link ONLY on bridge completion */}
                     {bridgeDone && bridgeTxHash && (
                       <a
                         href={opTxUrl(bridgeTxHash)}
@@ -600,13 +636,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
             {/* Step 4: Final Destination */}
             <div className="flex items-start gap-3">
               <div className="relative mt-0.5 shrink-0">
-                <Image
-                  src={ICON[finalTokenOnDest]}
-                  alt={finalTokenOnDest}
-                  width={40}
-                  height={40}
-                  className="rounded-full"
-                />
+                <Image src={ICON[finalTokenOnDest]} alt={finalTokenOnDest} width={40} height={40} className="rounded-full" />
                 <div className="absolute -bottom-0.5 -right-3 rounded-sm border-2 border-background">
                   <Image src="/networks/op-icon.png" alt={destChainLabel} width={16} height={16} className="rounded-sm" />
                 </div>

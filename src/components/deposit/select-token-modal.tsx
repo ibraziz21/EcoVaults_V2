@@ -50,7 +50,7 @@ export function SelectTokenModal({
           <h2 className="text-lg md:text-xl font-bold text-gray-900">Select a token</h2>
           <button
             onClick={onClose}
-            className="p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
+            className=" cursor-pointer p-1.5 hover:bg-gray-100 rounded-lg transition-colors"
             aria-label="Close"
             title="Close"
           >
@@ -67,7 +67,7 @@ export function SelectTokenModal({
               <button
                 key={token.id}
                 onClick={() => onSelect(token)}
-                className={`w-full px-4 py-3 md:px-6 md:py-4 transition-all flex items-center justify-between group text-left border-b border-gray-100 last:border-b-0 ${
+                className={` cursor-pointer w-full px-4 py-3 md:px-6 md:py-4 transition-all flex items-center justify-between group text-left border-b border-gray-100 last:border-b-0 ${
                   isSelected
                     ? "bg-[#F9FAFB] hover:bg-[#F9FAFB]"
                     : "bg-white hover:bg-[#F9FAFB]"

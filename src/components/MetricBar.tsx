@@ -38,7 +38,7 @@ export function MetricBar() {
   }[]
 
   return (
-    <div className="flex flex-wrap gap-4 mx-auto w-full max-w-6xl">
+    <div className="flex flex-wrap gap-4 mx-auto w-full max-w-[1392px]">
     {metrics.map((m, i) => (
       <div
         key={i}

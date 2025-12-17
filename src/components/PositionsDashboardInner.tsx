@@ -45,11 +45,11 @@ function toWithdrawSnap(pos: PositionLike, snap: YieldSnapshot): WithdrawSnap | 
 type PositionLike =
   | BasePosition
   | {
-      protocol: 'Morpho Blue'
-      chain: Extract<EvmChain, 'lisk'>
-      token: MorphoToken
-      amount: bigint // interpreted as the user’s current **receipt shares** for this modal
-    }
+    protocol: 'Morpho Blue'
+    chain: Extract<EvmChain, 'lisk'>
+    token: MorphoToken
+    amount: bigint // interpreted as the user’s current **receipt shares** for this modal
+  }
 
 const CHAIN_LABEL: Record<EvmChain, string> = { lisk: 'Lisk' }
 
@@ -107,7 +107,7 @@ export const PositionsDashboardInner: FC = () => {
           y.chain === p.chain &&
           y.protocolKey === 'morpho-blue' &&
           String(y.token).toLowerCase() ===
-            (normToken === 'usdce' ? 'usdc' : normToken === 'usdt0' ? 'usdt' : normToken),
+          (normToken === 'usdce' ? 'usdc' : normToken === 'usdt0' ? 'usdt' : normToken),
       )
     if (direct) return direct
 
@@ -126,8 +126,8 @@ export const PositionsDashboardInner: FC = () => {
       p.token === 'USDCe'
         ? (TokenAddresses.USDCe as any).lisk
         : p.token === 'USDT0'
-        ? (TokenAddresses.USDT0 as any).lisk
-        : (TokenAddresses.WETH as any).lisk
+          ? (TokenAddresses.USDT0 as any).lisk
+          : (TokenAddresses.WETH as any).lisk
 
     const fallback: YieldSnapshot = {
       id: `fallback-Morpho-${p.chain}-${String(p.token)}`,
@@ -218,13 +218,13 @@ export const PositionsDashboardInner: FC = () => {
         <DepositModal open={true} snap={depositSnap} onClose={() => setDepositSnap(null)} />
       )}
       {withdrawSnap && (
-  <WithdrawModal
-    open={true}
-    snap={{ token: withdrawSnap.token, chain: withdrawSnap.chain, poolAddress: withdrawSnap.poolAddress as `0x${string}` }}
-    shares={withdrawSnap.shares}
-    onClose={() => setWithdrawSnap(null)}
-  />
-)}
+        <WithdrawModal
+          open={true}
+          snap={{ token: withdrawSnap.token, chain: withdrawSnap.chain, poolAddress: withdrawSnap.poolAddress as `0x${string}` }}
+          shares={withdrawSnap.shares}
+          onClose={() => setWithdrawSnap(null)}
+        />
+      )}
     </>
   )
 }

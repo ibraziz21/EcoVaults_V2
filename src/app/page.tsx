@@ -7,7 +7,7 @@ export const metadata: Metadata = {
   description:
     'View your total deposits, APY, weekly yield and claimable rewards across all EcoVaults. A simple way to monitor your positions in real time.',
   alternates: {
-    canonical: '/', // -> https://vaults.labs.eco/
+    canonical: '/',
   },
   openGraph: {
     title: 'EcoVaults Dashboard',

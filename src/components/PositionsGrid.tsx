@@ -37,7 +37,7 @@ export const PositionsGrid = () => {
 
   /* ----- UI ----- */
   return (
-    <div className="space-y-12 mx-auto w-full max-w-6xl">
+    <div className="space-y-12 mx-auto w-full max-w-[1392px]">
       {/* headline stats */}
       <div className="grid gap-6 sm:grid-cols-3">
         <StatCard

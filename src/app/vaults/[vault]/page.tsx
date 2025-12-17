@@ -25,7 +25,7 @@ function getVaultMeta(slug: string) {
 
 // Use `any` here to play nicely with your custom PageProps typing
 export async function generateMetadata({ params }: any): Promise<Metadata> {
-  const vault = typeof params?.vault === 'string' ? params.vault : ''
+  const { vault } = await params;
   const { vaultName, tokenLabel } = getVaultMeta(vault)
 
   const title = `${vaultName} Vault | APY, TVL and Deposit Options`

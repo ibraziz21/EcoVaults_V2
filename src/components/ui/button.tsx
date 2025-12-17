@@ -6,12 +6,12 @@ import { cn } from "@/lib/utils"
 
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0 cursor-pointer h-[40px]",
   {
     variants: {
       variant: {
         default:
-          "font-medium bg-[#85d4bd] text-white shadow hover:bg-primary/90 rounded-2xl",
+          "font-medium bg-[#376FFF] text-white shadow hover:bg-[#2F5DD1] rounded-[12px]",
         destructive:
           "bg-destructive text-white shadow-sm hover:bg-destructive/90 rounded-2xl",
         outline:

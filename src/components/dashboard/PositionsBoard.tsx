@@ -29,7 +29,7 @@ export const PositionsBoard: FC<{
   const isOpen = open[id] ?? true
 
   return (
-    <div className="mx-auto w-full max-w-6xl space-y-6">
+    <div className="mx-auto w-full max-w-[1392px] space-y-6">
       <section className="space-y-3">
         <header className="flex items-center justify-between">
           <div className="flex items-baseline gap-3">
