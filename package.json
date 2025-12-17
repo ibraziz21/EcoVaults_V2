@@ -46,7 +46,7 @@
     "ethers": "^5.8.0",
     "lucide-react": "^0.536.0",
     "networks": "link:@reown/appkit/networks",
-    "next": "15.4.5",
+    "next": "15.4.8",
     "next-themes": "^0.4.6",
     "pino-pretty": "^13.1.1",
     "public": "link:@wagmi/providers/public",
