@@ -1,17 +1,16 @@
 // src/components/WithdrawModal/review-withdraw-modal.tsx
 'use client'
 
-import { FC, useMemo, useState } from 'react'
+import { FC, useEffect, useMemo, useState } from 'react'
 import Image from 'next/image'
 import { X, Check, ExternalLink, AlertCircle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useWalletClient } from 'wagmi'
-import type { Address } from 'viem'
+import { useAppKit } from '@reown/appkit/react'
 import { parseUnits } from 'viem'
 import { optimism } from 'viem/chains'
 import type { YieldSnapshot } from '@/hooks/useYields'
 import { TokenAddresses } from '@/lib/constants'
-import { CHAINS, switchOrAddChain } from '@/lib/wallet'
 import lifi from '@/public/logo_lifi_light_vertical.png'
 import { WithdrawSuccessModal } from './withdraw-success-modal'
 
@@ -24,7 +23,7 @@ type ChainSel = 'optimism'
 type FlowStep =
   | 'idle'
   | 'withdrawing' // signing + server-side burn/redeem
-  | 'bridging'    // server-side Li.Fi bridge in flight
+  | 'bridging' // server-side Li.Fi bridge in flight
   | 'success'
   | 'error'
 
@@ -58,20 +57,16 @@ const ICON = {
 
 const WITHDRAW_TYPES = {
   WithdrawIntent: [
-    { name: 'user',         type: 'address' },
+    { name: 'user', type: 'address' },
     { name: 'amountShares', type: 'uint256' },
-    { name: 'dstChainId',   type: 'uint256' },
-    { name: 'dstToken',     type: 'address' },
+    { name: 'dstChainId', type: 'uint256' },
+    { name: 'dstToken', type: 'address' },
     { name: 'minAmountOut', type: 'uint256' },
-    { name: 'deadline',     type: 'uint256' },
-    { name: 'nonce',        type: 'uint256' },
-    { name: 'refId',        type: 'bytes32' },
+    { name: 'deadline', type: 'uint256' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'refId', type: 'bytes32' },
   ],
 } as const
-
-function jsonBigintStr(x: bigint) {
-  return x.toString()
-}
 
 function randomRefId(): `0x${string}` {
   const bytes = new Uint8Array(32)
@@ -79,7 +74,41 @@ function randomRefId(): `0x${string}` {
   const hex = Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')
-  return (`0x${hex}`) as `0x${string}`
+  return `0x${hex}` as `0x${string}`
+}
+
+function fmt(n: number, decimals = 6) {
+  if (!Number.isFinite(n)) return '0'
+  const s = n.toFixed(decimals)
+  // trim trailing zeros
+  return s.replace(/\.?0+$/, '')
+}
+
+/**
+ * Safe Apps do not support chain switching in the embedded signer.
+ * We must sign on OP only; if not on OP, show a clear error.
+ */
+async function ensureOnOptimism(walletClient: any) {
+  // Prefer eth_chainId (works even if walletClient.chain is undefined)
+  const hex = (await walletClient.request({ method: 'eth_chainId' })) as string
+  const chainId = Number.parseInt(hex, 16)
+  if (chainId === optimism.id) return
+
+  // Outside Safe, switching might work; try once, otherwise fail clearly.
+  try {
+    await walletClient.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: `0x${optimism.id.toString(16)}` }],
+    })
+  } catch {
+    throw new Error('Please switch your wallet to OP Mainnet to continue.')
+  }
+
+  const hex2 = (await walletClient.request({ method: 'eth_chainId' })) as string
+  const chainId2 = Number.parseInt(hex2, 16)
+  if (chainId2 !== optimism.id) {
+    throw new Error('Please switch your wallet to OP Mainnet to continue.')
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -98,24 +127,26 @@ export const ReviewWithdrawModal: FC<Props> = ({
   user,
 }) => {
   const { data: walletClient } = useWalletClient()
+  const { open: openConnect } = useAppKit()
 
   const [step, setStep] = useState<FlowStep>('idle')
   const [err, setErr] = useState<string | null>(null)
   const [showSuccess, setShowSuccess] = useState(false)
   const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
 
+  // Reset modal state when (re)opened
+  useEffect(() => {
+    if (!open) return
+    setStep('idle')
+    setErr(null)
+    setShowSuccess(false)
+    setCurrentRefId(null)
+  }, [open])
+
   const liskToken: 'USDCe' | 'USDT0' = tokenLabelOnLisk(
     snap.token as 'USDC' | 'USDT',
   )
   const destSymbol: 'USDC' | 'USDT' = liskToken === 'USDT0' ? 'USDT' : 'USDC'
-
-  const liskTokenAddr = useMemo(
-    () =>
-      liskToken === 'USDCe'
-        ? (TokenAddresses.USDCe.lisk as Address)
-        : (TokenAddresses.USDT0.lisk as Address),
-    [liskToken],
-  )
 
   const dstTokenAddr = useMemo(
     () =>
@@ -127,19 +158,17 @@ export const ReviewWithdrawModal: FC<Props> = ({
 
   // ----- Fee math (UI-only, estimates) ---------------------------------------
   const grossAmount = amountOnLiskDisplay || 0
-  const protocolFeePct = 0.005 // 0.5% vault withdraw fee (UI, off-chain)
+  const protocolFeePct = 0.005 // 0.5% vault withdraw fee (UI-only estimate)
   const protocolFeeAmount = grossAmount > 0 ? grossAmount * protocolFeePct : 0
   const bridgeFeeAmount = bridgeFeeDisplay || 0
 
-  // Net amounts (approximate, for display)
   const netOnLisk = Math.max(grossAmount - protocolFeeAmount, 0)
-  const netOnDest = Math.max(
-    grossAmount - protocolFeeAmount - bridgeFeeAmount,
-    0,
-  )
+  const netOnDest = Math.max(grossAmount - protocolFeeAmount - bridgeFeeAmount, 0)
 
   const primaryLabel =
-    step === 'success'
+    !walletClient
+      ? 'Connect wallet'
+      : step === 'success'
       ? 'Done'
       : step === 'withdrawing'
       ? 'Withdrawing…'
@@ -149,14 +178,16 @@ export const ReviewWithdrawModal: FC<Props> = ({
       ? 'Try again'
       : 'Withdraw now'
 
+  const isWorking = step === 'withdrawing' || step === 'bridging'
+  const disabled = isWorking
+
   /* ------------------------------------------------------------------------ */
   /* Main confirm flow — using withdraw APIs                                  */
   /* ------------------------------------------------------------------------ */
 
   async function handleConfirm() {
     if (!walletClient) {
-      setErr('Wallet not connected')
-      setStep('error')
+      openConnect()
       return
     }
 
@@ -164,35 +195,33 @@ export const ReviewWithdrawModal: FC<Props> = ({
       setErr(null)
       setStep('withdrawing')
 
-      // 1) Make sure we are on OP to sign the intent
-      await switchOrAddChain(walletClient, CHAINS.optimism)
+      if (snap.chain !== 'lisk') {
+        throw new Error('Withdrawals are only supported from Lisk vaults.')
+      }
+
+      // OP-only signing (Safe compatible)
+      await ensureOnOptimism(walletClient)
 
       const nowMs = Date.now()
       const nowSec = Math.floor(nowMs / 1000)
       const deadlineSec = nowSec + 60 * 60 // 1h
       const nonceStr = String(nowMs)
 
-      // Conservative minAmountOut (in dest token units, 6 decimals)
-      // Use receiveOnDestDisplay if provided, otherwise approximate from netOnDest.
+      // Conservative minAmountOut (dest token units, 6 decimals)
       const baseMinOutDisplay =
         receiveOnDestDisplay && receiveOnDestDisplay > 0
           ? receiveOnDestDisplay
           : netOnDest
 
-      // Take an extra haircut to avoid underflow vs actual redeemed balance.
       const conservativeDisplay = baseMinOutDisplay * 0.98
-      const minAmountOutBn = parseUnits(
-        conservativeDisplay.toFixed(6),
-        6, // USDC/USDT decimals
-      )
+      const minAmountOutBn = parseUnits(conservativeDisplay.toFixed(6), 6)
 
       const amountSharesStr = shares.toString()
       const dstChainIdNum = optimism.id
       const deadlineStr = String(deadlineSec)
-      const minAmountOutStr = jsonBigintStr(minAmountOutBn)
+      const minAmountOutStr = minAmountOutBn.toString()
       const refId = currentRefId ?? randomRefId()
 
-      // 2) Build typed data message for signing
       const domain = {
         name: 'SuperYLDR',
         version: '1',
@@ -239,7 +268,6 @@ export const ReviewWithdrawModal: FC<Props> = ({
       })
 
       const createJson = await createRes.json().catch(() => null)
-
       if (!createRes.ok || !createJson?.ok) {
         throw new Error(createJson?.error || 'Failed to create withdraw intent')
       }
@@ -257,11 +285,8 @@ export const ReviewWithdrawModal: FC<Props> = ({
       })
 
       const finishJson = await finishRes.json().catch(() => null)
-
       if (!finishRes.ok || !finishJson?.ok) {
-        throw new Error(
-          finishJson?.error || 'Failed to finalize withdrawal & bridge',
-        )
+        throw new Error(finishJson?.error || 'Failed to finalize withdrawal & bridge')
       }
 
       setStep('success')
@@ -269,22 +294,22 @@ export const ReviewWithdrawModal: FC<Props> = ({
     } catch (e: any) {
       console.error('[withdraw modal] handleConfirm failed:', e)
       const code = e?.code ?? e?.error?.code
-      if (code === 4001) {
-        setErr('Signature was cancelled.')
-      } else {
-        setErr(e?.message ?? String(e))
-      }
+      if (code === 4001) setErr('Signature was cancelled.')
+      else setErr(e?.message ?? String(e))
       setStep('error')
     }
   }
 
   /* ------------------------------------------------------------------------ */
-  /* Retry: simply re-run finish, which is idempotent                          */
+  /* Retry: simply re-run finish (idempotent)                                  */
   /* ------------------------------------------------------------------------ */
 
   async function retryFinishOnly() {
-    if (!walletClient || !currentRefId) {
-      // If we somehow lost refId, just restart full flow
+    if (!walletClient) {
+      openConnect()
+      return
+    }
+    if (!currentRefId) {
       await handleConfirm()
       return
     }
@@ -300,11 +325,8 @@ export const ReviewWithdrawModal: FC<Props> = ({
       })
 
       const finishJson = await finishRes.json().catch(() => null)
-
       if (!finishRes.ok || !finishJson?.ok) {
-        throw new Error(
-          finishJson?.error || 'Failed to finalize withdrawal & bridge',
-        )
+        throw new Error(finishJson?.error || 'Failed to finalize withdrawal & bridge')
       }
 
       setStep('success')
@@ -312,31 +334,26 @@ export const ReviewWithdrawModal: FC<Props> = ({
     } catch (e: any) {
       console.error('[withdraw modal] retryFinishOnly failed:', e)
       const code = e?.code ?? e?.error?.code
-      if (code === 4001) {
-        setErr('Signature was cancelled. You can try again.')
-      } else {
-        setErr(e?.message ?? String(e))
-      }
+      if (code === 4001) setErr('Signature was cancelled. You can try again.')
+      else setErr(e?.message ?? String(e))
       setStep('error')
     }
   }
 
-  /* ------------------------------------------------------------------------ */
-  /* Button handler (mirror Deposit modal semantics)                          */
-  /* ------------------------------------------------------------------------ */
-
   function onPrimary() {
+    if (!walletClient) {
+      openConnect()
+      return
+    }
+
     if (step === 'success') {
       setShowSuccess(true)
       return
     }
 
     if (step === 'error') {
-      if (currentRefId) {
-        void retryFinishOnly()
-      } else {
-        void handleConfirm()
-      }
+      if (currentRefId) void retryFinishOnly()
+      else void handleConfirm()
       return
     }
 
@@ -346,48 +363,34 @@ export const ReviewWithdrawModal: FC<Props> = ({
     }
   }
 
-  const isWorking = step === 'withdrawing' || step === 'bridging'
-  const disabled = !walletClient || isWorking
-
-  // Convenience for display
   const destChainLabel = 'OP Mainnet'
   const finalTokenOnDest = destSymbol
   const finalNetAmount = netOnDest
 
-  // Step hint (intermediate copy)
   const stepHint = (() => {
     if (step === 'withdrawing') {
-      return 'Burning your vault shares and redeeming on Lisk. This usually takes under a minute.'
+      return 'Signing your withdrawal intent, then the relayer burns your shares and redeems on Lisk.'
     }
     if (step === 'bridging') {
-      return 'Bridge in progress. Final arrival time depends on network congestion.'
+      return 'Bridge in progress (relayer). Final arrival time depends on network congestion.'
     }
     if (step === 'success') {
       return 'Withdrawal complete. Your balances should update shortly.'
     }
     if (step === 'error') {
-      return err || 'Something went wrong. Check the steps above and retry.'
+      return err || 'Something went wrong. Check the error and retry.'
     }
     return 'Review the details and confirm your withdrawal.'
   })()
 
   const showBridgeBlock = true
   const showBridgeStep2 =
-    step === 'withdrawing' ||
-    step === 'bridging' ||
-    step === 'success' ||
-    step === 'error'
-
-  /* ------------------------------------------------------------------------ */
-  /* Render                                                                   */
-  /* ------------------------------------------------------------------------ */
+    step === 'withdrawing' || step === 'bridging' || step === 'success' || step === 'error'
 
   return (
     <div className={`fixed inset-0 z-[100] ${open ? '' : 'pointer-events-none'}`}>
       <div
-        className={`absolute inset-0 bg-black/50 transition-opacity ${
-          open ? 'opacity-100' : 'opacity-0'
-        }`}
+        className={`absolute inset-0 bg-black/50 transition-opacity ${open ? 'opacity-100' : 'opacity-0'}`}
       />
       <div className="absolute inset-0 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
         <div
@@ -410,23 +413,15 @@ export const ReviewWithdrawModal: FC<Props> = ({
             {/* row 1: withdrawing from vault */}
             <div className="flex items-start gap-3">
               <div className="relative mt-0.5">
-                <Image
-                  src={ICON.mor}
-                  alt="Morpho"
-                  width={28}
-                  height={28}
-                  className="rounded-lg"
-                />
+                <Image src={ICON.mor} alt="Morpho" width={28} height={28} className="rounded-lg" />
               </div>
               <div className="flex-1">
                 <div className="text-lg font-semibold">Withdrawing from Vault</div>
-                <div className="text-xs text-muted-foreground">
-                  Re7 {snap.token} Vault (Morpho Blue)
-                </div>
+                <div className="text-xs text-muted-foreground">Re7 {snap.token} Vault (Morpho Blue)</div>
               </div>
             </div>
 
-            {/* Withdrawal error indicator */}
+            {/* error indicator */}
             {step === 'error' && (
               <div className="flex items-center gap-2 text-xs text-red-600 ml-11">
                 <AlertCircle className="h-4 w-4" />
@@ -444,19 +439,12 @@ export const ReviewWithdrawModal: FC<Props> = ({
                   height={28}
                   className="rounded-full"
                 />
-                {/* Square network badge */}
                 <div className="absolute -bottom-0.5 -right-0.5 rounded-sm border-2 border-background">
-                  <Image
-                    src="/networks/lisk.png"
-                    alt="Lisk"
-                    width={16}
-                    height={16}
-                    className="rounded-sm"
-                  />
+                  <Image src="/networks/lisk.png" alt="Lisk" width={16} height={16} className="rounded-sm" />
                 </div>
               </div>
               <div className="flex-1">
-                <div className="text-2xl font-bold">{amountOnLiskDisplay}</div>
+                <div className="text-2xl font-bold">{fmt(amountOnLiskDisplay, 6)}</div>
                 <div className="text-xs text-muted-foreground">
                   ≈ ${amountOnLiskDisplay.toFixed(2)} • {liskToken} on Lisk (before fees)
                 </div>
@@ -467,21 +455,16 @@ export const ReviewWithdrawModal: FC<Props> = ({
             {showBridgeBlock && (
               <div className="flex items-start gap-3">
                 <div className="relative mt-0.5">
-                  <Image
-                    src={ICON.bridge}
-                    alt="LI.FI"
-                    width={28}
-                    height={28}
-                    className="rounded-full"
-                  />
+                  <Image src={ICON.bridge} alt="LI.FI" width={28} height={28} className="rounded-full" />
                 </div>
+
                 <div className="flex-1">
                   <div className="text-lg font-semibold">Bridging via LI.FI</div>
                   <div className="text-xs text-muted-foreground">
                     Bridge happens via the relayer. No extra signatures needed.
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Bridge fee (est.): {bridgeFeeAmount.toFixed(6)} {destSymbol}
+                    Bridge fee (est.): {fmt(bridgeFeeAmount, 6)} {destSymbol}
                   </div>
 
                   <div className="mt-2 space-y-2 text-xs">
@@ -511,15 +494,12 @@ export const ReviewWithdrawModal: FC<Props> = ({
                         ) : (
                           <span className="h-2 w-2 rounded-full bg-muted-foreground/40" />
                         )}
-                        <span>
-                          {step === 'error'
-                            ? 'Bridge or redeem may have failed'
-                            : 'Bridge to OP Mainnet'}
-                        </span>
+                        <span>{step === 'error' ? 'Bridge or redeem may have failed' : 'Bridge to OP Mainnet'}</span>
                       </div>
                     )}
                   </div>
                 </div>
+
                 {(step === 'bridging' || step === 'success') && (
                   <a
                     href="#"
@@ -543,37 +523,27 @@ export const ReviewWithdrawModal: FC<Props> = ({
                   className="rounded-full"
                 />
                 <div className="absolute -bottom-0.5 -right-0.5 rounded-sm border-2 border-background">
-                  <Image
-                    src="/networks/op-icon.png"
-                    alt={destChainLabel}
-                    width={16}
-                    height={16}
-                    className="rounded-sm"
-                  />
+                  <Image src="/networks/op-icon.png" alt={destChainLabel} width={16} height={16} className="rounded-sm" />
                 </div>
               </div>
               <div className="flex-1">
-                <div className="text-2xl font-bold">{finalNetAmount}</div>
+                <div className="text-2xl font-bold">{fmt(finalNetAmount, 6)}</div>
                 <div className="text-xs text-muted-foreground">
                   ≈ ${finalNetAmount.toFixed(2)} • {finalTokenOnDest} on {destChainLabel}
                 </div>
 
                 <div className="mt-2 text-[11px] text-muted-foreground space-y-0.5">
                   <div>
-                    • 0.5% vault withdraw fee (~{protocolFeeAmount.toFixed(6)} {liskToken})
+                    • 0.5% vault withdraw fee (~{fmt(protocolFeeAmount, 6)} {liskToken})
                   </div>
                   <div>
-                    • Bridge fee (est.) ~{bridgeFeeAmount.toFixed(6)} {destSymbol}
+                    • Bridge fee (est.) ~{fmt(bridgeFeeAmount, 6)} {destSymbol}
                   </div>
                 </div>
               </div>
             </div>
 
-            {stepHint && (
-              <div className="text-xs text-muted-foreground">
-                {stepHint}
-              </div>
-            )}
+            {stepHint && <div className="text-xs text-muted-foreground">{stepHint}</div>}
           </div>
 
           {/* footer */}

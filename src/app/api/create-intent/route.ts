@@ -8,6 +8,7 @@ import { optimism, lisk as liskChain } from 'viem/chains'
 import { prisma } from '@/lib/db'
 import { randomUUID } from 'node:crypto'
 import { registryCreateIntent } from '@/lib/intentRegistry'
+import { TokenAddresses } from '@/lib/constants'
 
 /* ──────────────────────────────────────────────────────────── */
 /* Types & helpers                                              */
@@ -49,6 +50,13 @@ function bad(m: string, s = 400) {
 
 const ZERO32 = '0x'.padEnd(66, '0') as `0x${string}`
 
+/** allowlist of supported destination assets (Lisk) */
+const ALLOWED_ASSETS = new Set<string>([
+  TokenAddresses.USDCe.lisk.toLowerCase(),
+  TokenAddresses.USDT0.lisk.toLowerCase(),
+  TokenAddresses.WETH.lisk.toLowerCase(),
+])
+
 /* ──────────────────────────────────────────────────────────── */
 /* Route                                                       */
 /* ──────────────────────────────────────────────────────────── */
@@ -64,6 +72,21 @@ export async function POST(req: Request) {
     if (!(intent as any)[k]) return bad(`missing ${k}`)
   }
 
+  // Enforce supported destination asset (anti-poisoning)
+  const assetLc = String(intent.asset).toLowerCase()
+  if (!ALLOWED_ASSETS.has(assetLc)) {
+    return bad('unsupported asset', 422)
+  }
+
+  // Enforce amount > 0 before any heavy work
+  let amt: bigint
+  try {
+    amt = BigInt(intent.amount)
+  } catch {
+    return bad('amount invalid', 422)
+  }
+  if (amt <= 0n) return bad('amount must be > 0', 422)
+
   // Domain is always Optimism now (user side = OP only)
   const chainId = optimism.id
   const domain = { name: 'SuperYLDR', version: '1', chainId }
@@ -75,14 +98,14 @@ export async function POST(req: Request) {
 
   const types = {
     DepositIntent: [
-      { name: 'user',     type: 'address' },
-      { name: 'key',      type: 'bytes32' },
-      { name: 'asset',    type: 'address' },
-      { name: 'amount',   type: 'uint256' },
+      { name: 'user', type: 'address' },
+      { name: 'key', type: 'bytes32' },
+      { name: 'asset', type: 'address' },
+      { name: 'amount', type: 'uint256' },
       { name: 'deadline', type: 'uint256' },
-      { name: 'nonce',    type: 'uint256' },
-      { name: 'refId',    type: 'bytes32' },
-      { name: 'salt',     type: 'bytes32' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'refId', type: 'bytes32' },
+      { name: 'salt', type: 'bytes32' },
     ],
   } as const
 
@@ -90,7 +113,7 @@ export async function POST(req: Request) {
     user: intent.user,
     key: adapterKeyForSig,
     asset: intent.asset,
-    amount: BigInt(intent.amount),
+    amount: amt,
     deadline: BigInt(intent.deadline),
     nonce: BigInt(intent.nonce),
     refId: intent.refId,
@@ -117,8 +140,6 @@ export async function POST(req: Request) {
   })
 
   // 3) Pre-flight uniqueness checks (idempotency & replay safety)
-  //    - We allow same refId to be re-sent only if it is still PENDING
-  //    - digest and signature must be globally unique
   const existingByRef = await prisma.depositIntent
     .findUnique({ where: { refId: intent.refId } })
     .catch(() => null)
@@ -138,10 +159,7 @@ export async function POST(req: Request) {
   const existed = await prisma.depositIntent
     .findFirst({
       where: {
-        OR: [
-          { digest: digest as any },
-          { signature: signature as any },
-        ] as any,
+        OR: [{ digest: digest as any }, { signature: signature as any }] as any,
       },
       select: { refId: true },
     })
@@ -155,16 +173,16 @@ export async function POST(req: Request) {
     user: intent.user,
     adapterKey: intent.adapterKey ?? null,
     asset: intent.asset,
-    amount: intent.amount,      // store as string
-    minAmount: intent.amount,   // initial; can be relaxed later in /finish
+    amount: intent.amount, // store as string
+    minAmount: intent.amount, // initial; can be relaxed later in /finish
     deadline: intent.deadline,
     nonce: intent.nonce,
     salt: intent.salt,
     digest,
     signature,
     status: 'PENDING',
-    fromChainId: optimism.id,    // 🔒 user side is always Optimism now
-    toChainId: liskChain.id,     // 🔒 destination is Lisk in this build
+    fromChainId: optimism.id, // 🔒 user side is always Optimism now
+    toChainId: liskChain.id, // 🔒 destination is Lisk in this build
     // srcToken: intent.srcToken ?? null, // uncomment if added to Prisma
   }
 

@@ -1,13 +1,28 @@
 // src/lib/withdrawer.ts
-import type { WalletClient } from 'viem'
+import type { WalletClient, Chain } from 'viem'
 import { encodeAbiParameters, keccak256, stringToBytes } from 'viem'
 import aggregatorRouterAbi from './abi/AggregatorRouter.json'
 import { ROUTERS } from './constants'
 import { ensureAllowanceForRouterOnLisk } from './depositor'
 import { publicLisk } from './clients'
-import { CHAINS } from './wallet'
 
 type TokenLisk = 'USDCe' | 'USDT0'
+
+/**
+ * Hard-coded Lisk chain for viem call overrides.
+ * Replace the chainId if your deployment uses a different Lisk chain id.
+ */
+const LISK_CHAIN_ID = 1135
+
+const LISK_CHAIN: Chain = {
+  id: LISK_CHAIN_ID,
+  name: 'Lisk',
+  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  rpcUrls: {
+    default: { http: ['https://rpc.api.lisk.com'] },
+    public: { http: ['https://rpc.api.lisk.com'] },
+  },
+} as const
 
 function keyForMorphoLisk(token: TokenLisk): `0x${string}` {
   // keccak256("morpho-blue:lisk:USDCe" | "morpho-blue:lisk:USDT0")
@@ -15,9 +30,7 @@ function keyForMorphoLisk(token: TokenLisk): `0x${string}` {
   return keccak256(stringToBytes(label)) as `0x${string}`
 }
 
-async function waitReceiptLisk(hash: `0x${string}`) {
-  await publicLisk.waitForTransactionReceipt({ hash })
-}
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
  * Withdraw from Morpho on Lisk via Router:
@@ -27,12 +40,13 @@ async function waitReceiptLisk(hash: `0x${string}`) {
 export async function withdrawMorphoOnLisk(opts: {
   token: TokenLisk
   shares: bigint
-  shareToken: `0x${string}`        // vault (ERC-4626) address — THIS is the "asset" for withdraw()
-  underlying: `0x${string}`        // Lisk underlying token to receive
+  shareToken: `0x${string}` // vault (ERC-4626) address — this is the "asset" for router.withdraw()
+  underlying: `0x${string}` // Lisk underlying token to receive
   to: `0x${string}`
   wallet: WalletClient
 }) {
   const { token, shares, shareToken, underlying, to, wallet } = opts
+
   const owner = wallet.account?.address as `0x${string}` | undefined
   if (!owner) throw new Error('Wallet not connected')
 
@@ -54,22 +68,23 @@ export async function withdrawMorphoOnLisk(opts: {
     functionName: 'withdraw',
     args: [key, shareToken, shares, to, data],
     account: owner,
-    chain: CHAINS.lisk,     // 🔥 FORCE SIMULATION ON LISK
+    chain: LISK_CHAIN, // ✅ hard-coded chain object
   })
-  
-  // 🔥 IMPORTANT — force write on Lisk!
-  const tx = await wallet.writeContract({
+
+  // ✅ force the write on Lisk even if the wallet client is multi-chain
+  const txHash = await wallet.writeContract({
     ...request,
-    chain: CHAINS.lisk,     // <<<< THIS FIXES EVERYTHING
+    chain: LISK_CHAIN, // ✅ hard-coded chain object
   })
-  
-  const withdrawTx = await publicLisk.waitForTransactionReceipt({ hash: tx })
-  
-  const minedAt = BigInt(withdrawTx.blockNumber ?? 0)
+
+  const receipt = await publicLisk.waitForTransactionReceipt({ hash: txHash })
+
+  // Optional: wait a couple blocks for indexers / UI to catch up
+  const minedAt = BigInt(receipt.blockNumber ?? 0)
   const target = minedAt + 2n
   while ((await publicLisk.getBlockNumber()) < target) {
-    await new Promise((r) => setTimeout(r, 1200)) // ~1.2s poll; tweak if needed
+    await sleep(1200)
+  }
 
-  return { tx }
-}
+  return { tx: txHash }
 }

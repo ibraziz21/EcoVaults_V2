@@ -5,6 +5,8 @@ import { privateKeyToAccount } from 'viem/accounts'
 
 const INTENT_REGISTRY = process.env.INTENT_REGISTRY as `0x${string}`
 
+const ZERO32 = (`0x${'0'.repeat(64)}`) as `0x${string}`
+
 export const intentRegistryAbi = [
   {
     type: 'function',
@@ -75,6 +77,8 @@ export const intentRegistryAbi = [
 
 function getOpClients() {
   const RAW = (process.env.RELAYER_PRIVATE_KEY || '').trim().replace(/^['"]|['"]$/g, '')
+  if (!RAW) throw new Error('RELAYER_PRIVATE_KEY missing')
+
   const priv = (`0x${RAW.replace(/^0x/i, '')}`) as `0x${string}`
   const account = privateKeyToAccount(priv)
 
@@ -122,15 +126,14 @@ export async function registryMarkBridged(params: {
   if (!INTENT_REGISTRY) return
   const { pub, wlt, account } = getOpClients()
 
+  // ✅ bytes32-safe: never pass "0x"
+  const safeToTxHash = (params.toTxHash && params.toTxHash.length === 66 ? params.toTxHash : ZERO32) as `0x${string}`
+
   const { request } = await pub.simulateContract({
     address: INTENT_REGISTRY,
     abi: intentRegistryAbi,
     functionName: 'markBridged',
-    args: [
-      params.refId,
-      params.bridgedAmount,
-      (params.toTxHash ?? '0x') as `0x${string}`,
-    ],
+    args: [params.refId, params.bridgedAmount, safeToTxHash],
     account,
   })
 
@@ -144,11 +147,15 @@ export async function registryMarkDeposited(params: {
   if (!INTENT_REGISTRY) return
   const { pub, wlt, account } = getOpClients()
 
+  // depositTxHash is bytes32 in registry; enforce 32-byte hex
+  const safeDepositHash =
+    params.depositTxHash?.length === 66 ? params.depositTxHash : ZERO32
+
   const { request } = await pub.simulateContract({
     address: INTENT_REGISTRY,
     abi: intentRegistryAbi,
     functionName: 'markDeposited',
-    args: [params.refId, params.depositTxHash],
+    args: [params.refId, safeDepositHash as `0x${string}`],
     account,
   })
 
@@ -162,11 +169,14 @@ export async function registryMarkMinted(params: {
   if (!INTENT_REGISTRY) return
   const { pub, wlt, account } = getOpClients()
 
+  // mintTxHash is bytes32 in registry; enforce 32-byte hex
+  const safeMintHash = params.mintTxHash?.length === 66 ? params.mintTxHash : ZERO32
+
   const { request } = await pub.simulateContract({
     address: INTENT_REGISTRY,
     abi: intentRegistryAbi,
     functionName: 'markMinted',
-    args: [params.refId, params.mintTxHash],
+    args: [params.refId, safeMintHash as `0x${string}`],
     account,
   })
 

@@ -1,5 +1,4 @@
 // src/app/api/relayer/route-progress/route.ts
-
 import 'server-only'
 export const runtime = 'nodejs'
 
@@ -12,9 +11,13 @@ import { optimism } from 'viem/chains'
 /* Env / constants                                              */
 /* ──────────────────────────────────────────────────────────── */
 
-const RELAYER_LISK  = process.env.RELAYER_LISK?.toLowerCase() || null
-const USDT0_LISK    = process.env.USDT0_LISK?.toLowerCase()   || null
 const LISK_CHAIN_ID = Number(process.env.LISK_CHAIN_ID ?? 1135)
+
+// Who is allowed to receive on Lisk (anti-poisoning)
+// If you *also* receive into an executor, set this env.
+// If you don't, leave it empty and only RELAYER_LISK will be allowed.
+const RELAYER_LISK = (process.env.RELAYER_LISK ?? '').toLowerCase() || null
+const LISK_EXECUTOR = (process.env.LISK_EXECUTOR_ADDRESS ?? '').toLowerCase() || null
 
 /* ──────────────────────────────────────────────────────────── */
 /* Helpers                                                      */
@@ -68,8 +71,16 @@ export async function POST(req: Request) {
   const immutableGuard = (field: keyof typeof intent, incoming?: any) => {
     if (incoming == null) return
     const prev = (intent as any)[field]
-    const prevNorm = typeof prev === 'string' ? prev.toLowerCase?.() ?? prev : prev
-    const nextNorm = typeof incoming === 'string' ? incoming.toLowerCase?.() ?? incoming : incoming
+
+    // normalize only for addresses/symbols; do NOT lowercase tx hashes
+    const norm = (v: any) =>
+      typeof v === 'string' && v.startsWith('0x') && v.length === 42
+        ? v.toLowerCase()
+        : v
+
+    const prevNorm = norm(prev)
+    const nextNorm = norm(incoming)
+
     if (prev != null && prev !== '' && prevNorm !== nextNorm) {
       throw new Error(`immutable field already set: ${String(field)}`)
     }
@@ -88,17 +99,28 @@ export async function POST(req: Request) {
 
     if (b.toAddress) {
       const toAddr = b.toAddress.toLowerCase()
-      if (RELAYER_LISK && toAddr !== RELAYER_LISK) {
-        return bad('toAddress mismatch (relayer)')
+
+      // allowed receivers: relayer and optionally executor (if configured)
+      const allowed = new Set<string>()
+      if (RELAYER_LISK) allowed.add(RELAYER_LISK)
+      if (LISK_EXECUTOR) allowed.add(LISK_EXECUTOR)
+
+      if (allowed.size > 0 && !allowed.has(toAddr)) {
+        return bad('toAddress mismatch (receiver not allowed)')
       }
+
       immutableGuard('toAddress', toAddr)
     }
 
     if (b.toTokenAddress) {
       const tok = b.toTokenAddress.toLowerCase()
-      if (USDT0_LISK && tok !== USDT0_LISK) {
-        return bad('toTokenAddress mismatch (USDT0)')
+
+      // Validate against the intent's destination asset (source of truth)
+      const expectedAsset = (intent.asset ?? '').toLowerCase()
+      if (expectedAsset && tok !== expectedAsset) {
+        return bad(`toTokenAddress mismatch (expected intent.asset ${expectedAsset})`)
       }
+
       immutableGuard('toTokenAddress', tok)
     }
 
@@ -115,14 +137,15 @@ export async function POST(req: Request) {
       if (srcId !== optimism.id) {
         return bad(`fromChainId mismatch (expected Optimism: ${optimism.id})`)
       }
-
       immutableGuard('fromChainId', srcId)
 
       const client = clientFor(srcId)
-      const rcp = await client.getTransactionReceipt({ hash: b.fromTxHash }).catch(() => null)
-      if (!rcp) return bad('fromTx not found on chain', 422)
 
-      const txFrom = (rcp as any).from?.toLowerCase?.()
+      // IMPORTANT: sender is on the transaction, not reliably on receipt
+      const tx = await client.getTransaction({ hash: b.fromTxHash }).catch(() => null)
+      if (!tx) return bad('fromTx not found on chain', 422)
+
+      const txFrom = (tx.from as string | undefined)?.toLowerCase?.()
       if (!txFrom || txFrom !== intent.user.toLowerCase()) {
         return bad('fromTx sender mismatch with intent.user', 422)
       }

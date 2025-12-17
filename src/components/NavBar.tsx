@@ -5,55 +5,19 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import Image from 'next/image'
-import { useAppKit } from '@reown/appkit/react' // keep only useAppKit
-import { useAccount, useDisconnect, useChainId, useSwitchChain } from 'wagmi'
 import { Button } from '@/components/ui/button'
-import socialImg from '@/public/logo_horizontal.svg'
-import ecovaults from "@/public/eco-vaults.svg"
-import baseImg from '@/public/base_square_blue.svg'
-import { ExitIcon } from '@radix-ui/react-icons'
-import ExitIconSvg from "../../public/exit-icon.svg"
-import CopyIconSvg from "../../public/copy.svg"
-import ShareIconSvg from "../../public/share.svg"
+import { useAccount, useChainId, useConnect, useDisconnect, useSwitchChain } from 'wagmi'
+
+import ecovaults from '@/public/eco-vaults.svg'
+import CopyIconSvg from '../../public/copy.svg'
+import ShareIconSvg from '../../public/share.svg'
+import ExitIconSvg from '../../public/exit-icon.svg'
 
 /* ──────────────────────────────────────────────────────────────── */
+/* Constants                                                         */
+/* ──────────────────────────────────────────────────────────────── */
 
-const CHAIN_META: Record<
-  number,
-  {
-    key: 'optimism' | 'base' | 'lisk'
-    label: string
-    badge: string
-    icon: any
-    bg: string
-    ring: string
-  }
-> = {
-  10: {
-    key: 'optimism',
-    label: 'OP Mainnet',
-    badge: 'OP',
-    icon: '/networks/op-icon.png',
-    bg: 'bg-rose-600',
-    ring: 'ring-rose-500/30',
-  },
-  8453: {
-    key: 'base',
-    label: 'Base',
-    badge: 'BASE',
-    icon: baseImg,
-    bg: 'bg-blue-600',
-    ring: 'ring-blue-500/30',
-  },
-  1135: {
-    key: 'lisk',
-    label: 'Lisk',
-    badge: 'LSK',
-    icon: '/networks/lisk.png',
-    bg: 'bg-indigo-600',
-    ring: 'ring-indigo-500/30',
-  },
-}
+const OP_CHAIN_ID = 10
 
 function shortAddr(a?: string) {
   if (!a) return ''
@@ -61,20 +25,37 @@ function shortAddr(a?: string) {
   return `${a.slice(0, 6)}…${a.slice(-4)}`
 }
 
+function isProbablyInIframe() {
+  try {
+    return typeof window !== 'undefined' && window.self !== window.top
+  } catch {
+    return true
+  }
+}
 
-function NetworkBadge({ chainId }: { chainId?: number }) {
-  if (!chainId || !CHAIN_META[chainId]) return null
-  const m = CHAIN_META[chainId]
+/**
+ * Safe embeds apps in an iframe, but iframes can happen elsewhere too.
+ * This is a practical heuristic: treat iframe as “likely Safe” and
+ * show “Open in Safe” when not embedded.
+ */
+function useLikelySafeContext() {
+  const [embedded, setEmbedded] = useState(false)
+  useEffect(() => {
+    setEmbedded(isProbablyInIframe())
+  }, [])
+  return embedded
+}
 
+function NetworkBadge() {
   return (
     <div
       className="inline-flex items-center justify-center rounded-md border border-gray-200 bg-white p-1"
-      title={m.label}
+      title="OP Mainnet"
     >
       <span className="relative inline-flex h-5 w-5 items-center justify-center rounded-md overflow-hidden">
         <Image
-          src={m.icon}
-          alt={m.label}
+          src="/networks/op-icon.png"
+          alt="OP Mainnet"
           width={20}
           height={20}
           className="h-5 w-5 rounded-md"
@@ -90,10 +71,11 @@ function ActiveLink({ href, children }: { href: string; children: React.ReactNod
   return (
     <Link
       href={href}
-      className={`rounded-xl px-3 py-2 text-sm transition ${active
-        ? 'bg-[#F3F4F6] text-black font-semibold'
-        : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
-        }`}
+      className={`rounded-xl px-3 py-2 text-sm transition ${
+        active
+          ? 'bg-[#F3F4F6] text-black font-semibold'
+          : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'
+      }`}
     >
       {children}
     </Link>
@@ -101,19 +83,23 @@ function ActiveLink({ href, children }: { href: string; children: React.ReactNod
 }
 
 /* ──────────────────────────────────────────────────────────────── */
+/* Navbar                                                            */
+/* ──────────────────────────────────────────────────────────────── */
 
 export function Navbar() {
   const pathname = usePathname()
-  const { open } = useAppKit()
-  const { address } = useAccount()
-  const { disconnect } = useDisconnect()
+  const likelySafe = useLikelySafeContext()
+
+  const { address, isConnected } = useAccount()
   const chainId = useChainId()
+  const { disconnect } = useDisconnect()
+
+  const { connectors, connectAsync, isPending: isConnecting } = useConnect()
   const { switchChainAsync, isPending: isSwitching } = useSwitchChain()
 
   const [menuOpen, setMenuOpen] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const [copied, setCopied] = useState(false)
-  const [elevated, setElevated] = useState(false)
 
   const mobileRef = useRef<HTMLDivElement | null>(null)
   const accountMenuRef = useRef<HTMLDivElement | null>(null)
@@ -122,25 +108,6 @@ export function Navbar() {
     setMenuOpen(false)
     setMobileOpen(false)
   }, [pathname])
-
-  useEffect(() => {
-    const onScroll = () => setElevated(window.scrollY > 6)
-    onScroll()
-    window.addEventListener('scroll', onScroll, { passive: true })
-    return () => window.removeEventListener('scroll', onScroll)
-  }, [])
-
-  useEffect(() => {
-    // Lock body scroll when mobile sheet is open
-    const body = document.body
-    if (mobileOpen) {
-      const prev = body.style.overflow
-      body.style.overflow = 'hidden'
-      return () => {
-        body.style.overflow = prev
-      }
-    }
-  }, [mobileOpen])
 
   useEffect(() => {
     // Close menus on outside click
@@ -163,15 +130,13 @@ export function Navbar() {
     }
   }, [mobileOpen])
 
-  const currentChain = useMemo(() => (chainId ? CHAIN_META[chainId] : undefined), [chainId])
-
   async function copyAddress() {
     if (!address) return
     try {
       await navigator.clipboard.writeText(address)
       setCopied(true)
       setTimeout(() => setCopied(false), 1200)
-    } catch { }
+    } catch {}
   }
 
   function openOnOptimismExplorer() {
@@ -180,13 +145,35 @@ export function Navbar() {
     window.open(url, '_blank', 'noopener,noreferrer')
   }
 
+  const onWrongChain = isConnected && chainId !== OP_CHAIN_ID
 
-  async function quickSwitch(id: number) {
+  async function switchToOP() {
     try {
-      await switchChainAsync?.({ chainId: id })
+      await switchChainAsync?.({ chainId: OP_CHAIN_ID })
     } catch (e) {
-      console.error('Switch chain failed:', e)
+      console.error('[Navbar] switch chain failed:', e)
     }
+  }
+
+  // Optional dev connect: if you want to allow non-Safe testing in browser
+  const injectedConnector = useMemo(
+    () => connectors.find((c) => c.id === 'injected' || c.name?.toLowerCase().includes('metamask')),
+    [connectors],
+  )
+
+  async function connectDevWallet() {
+    if (!injectedConnector) return
+    try {
+      await connectAsync({ connector: injectedConnector })
+    } catch (e) {
+      console.error('[Navbar] connect failed:', e)
+    }
+  }
+
+  function openInSafe() {
+    // You’ll typically rely on Safe’s “Apps” directory / direct add by URL.
+    // This CTA is still useful for users who landed outside Safe.
+    window.open('https://app.safe.global/apps', '_blank', 'noopener,noreferrer')
   }
 
   return (
@@ -199,13 +186,14 @@ export function Navbar() {
             <Link href="/" className="group inline-flex items-center gap-2 min-w-0">
               <Image
                 src={ecovaults}
-                alt="ecovaults"
-                width={0}
-                height={0}
+                alt="EcoVaults"
+                width={144}
+                height={36}
                 priority
-                className="h-auto w-auto"
+                className="h-9 w-auto"
               />
             </Link>
+
             {/* Desktop nav */}
             <nav className="ml-2 hidden items-center gap-1 md:flex">
               <ActiveLink href="/">Dashboard</ActiveLink>
@@ -233,16 +221,12 @@ export function Navbar() {
               </svg>
             </button>
 
-            {/* Network control (if connected) */}
-            {address &&
-              (chainId === 10 ? (
-                // On OP → show small chain badge
-                <NetworkBadge chainId={chainId} />
-              ) : (
-                // Not on OP → show "Switch to OP Mainnet" pill
+            {/* OP-only: network badge / switch pill */}
+            {isConnected && (
+              onWrongChain ? (
                 <button
                   type="button"
-                  onClick={() => quickSwitch(10)}
+                  onClick={switchToOP}
                   disabled={isSwitching}
                   className="hidden md:inline-flex h-9 items-center gap-2 rounded-xl border border-[#FACC6B] bg-[#FFFAEB] px-4 text-sm font-semibold text-black shadow-sm disabled:opacity-60"
                   title="Switch network to Optimism"
@@ -258,17 +242,37 @@ export function Navbar() {
                     />
                   </span>
                 </button>
-              ))}
+              ) : (
+                <NetworkBadge />
+              )
+            )}
 
             {/* Wallet area */}
-            {!address ? (
-              <Button
-                onClick={() => open({ view: 'Connect' })}
-                className="hidden md:flex bg-[#376FFF] p-5 rounded-lg"
-                title="Connect Wallet"
-              >
-                Connect Wallet
-              </Button>
+            {!isConnected ? (
+              <div className="hidden md:flex items-center gap-2">
+                {/* Primary: open inside Safe */}
+                <Button
+                  onClick={openInSafe}
+                  className="bg-[#376FFF] px-4 rounded-lg"
+                  title="Open in Safe"
+                  disabled={likelySafe} // if we’re embedded, this button is irrelevant
+                >
+                  Open in Safe
+                </Button>
+
+                {/* Optional dev-only connect (remove if you want strict Safe-only) */}
+                {!!injectedConnector && !likelySafe && (
+                  <Button
+                    onClick={connectDevWallet}
+                    variant="secondary"
+                    className="rounded-lg"
+                    disabled={isConnecting}
+                    title="Connect wallet (dev)"
+                  >
+                    {isConnecting ? 'Connecting…' : 'Connect wallet (dev)'}
+                  </Button>
+                )}
+              </div>
             ) : (
               <div className="relative" ref={accountMenuRef}>
                 <button
@@ -279,10 +283,7 @@ export function Navbar() {
                   aria-haspopup="menu"
                 >
                   <div className="h-5 w-5 rounded-full bg-gradient-to-br from-teal-500 to-cyan-500 ring-1 ring-black/5" />
-                  <span className="max-w-[92px] whitespace-nowrap">
-                    {shortAddr(address)}
-                  </span>
-
+                  <span className="max-w-[92px] whitespace-nowrap">{shortAddr(address)}</span>
                 </button>
 
                 {menuOpen && (
@@ -302,7 +303,11 @@ export function Navbar() {
                             <span className="truncate text-xs font-semibold" title={address}>
                               {shortAddr(address)}
                             </span>
+                            <span className="text-[11px] text-muted-foreground text-center">
+                              {onWrongChain ? 'Wrong network' : 'OP Mainnet'}
+                            </span>
                           </div>
+
                           <Image
                             src={CopyIconSvg}
                             width={14}
@@ -319,15 +324,16 @@ export function Navbar() {
                             onClick={openOnOptimismExplorer}
                             className="cursor-pointer"
                           />
-
                         </div>
                       </div>
                     </div>
 
                     {/* actions */}
                     <div className="p-2 text-sm">
+                      {/* In Safe context, “disconnect” is usually not meaningful.
+                          Keep it for dev wallets, or remove if you want strict Safe-only UX. */}
                       <button
-                        className="mt-2 flex w-full items-center justify-start rounded-md px-3 py-2 text-red-600 hover:bg-red-50 dark:hover:bg-red-950/20"
+                        className="mt-2 flex w-full items-center justify-start rounded-md px-3 py-2 text-red-600 hover:bg-red-50"
                         onClick={() => {
                           setMenuOpen(false)
                           disconnect()
@@ -355,8 +361,9 @@ export function Navbar() {
       >
         {/* overlay */}
         <div
-          className={`absolute inset-0 bg-black/40 backdrop-blur-[2px] transition-opacity ${mobileOpen ? 'opacity-100' : 'opacity-0'
-            }`}
+          className={`absolute inset-0 bg-black/40 backdrop-blur-[2px] transition-opacity ${
+            mobileOpen ? 'opacity-100' : 'opacity-0'
+          }`}
           onClick={() => setMobileOpen(false)}
         />
 
@@ -365,8 +372,9 @@ export function Navbar() {
           ref={mobileRef}
           role="dialog"
           aria-modal="true"
-          className={`absolute right-0 top-0 h-full w-[86%] max-w-sm bg-background shadow-2xl ring-1 ring-border/60 transition-transform duration-200 ease-out ${mobileOpen ? 'translate-x-0' : 'translate-x-full'
-            }`}
+          className={`absolute right-0 top-0 h-full w-[86%] max-w-sm bg-background shadow-2xl ring-1 ring-border/60 transition-transform duration-200 ease-out ${
+            mobileOpen ? 'translate-x-0' : 'translate-x-full'
+          }`}
         >
           <div className="flex h-14 items-center justify-between border-b px-3">
             <div className="inline-flex items-center gap-2">
@@ -400,18 +408,34 @@ export function Navbar() {
             <div className="p-3">
               {/* wallet box */}
               <div className="rounded-2xl border p-3">
-                {!address ? (
+                {!isConnected ? (
                   <>
-                    <div className="mb-2 text-sm">You&rsquo;re not connected</div>
+                    <div className="mb-2 text-sm">
+                      {likelySafe ? 'Waiting for Safe context…' : 'Open this app in Safe{Wallet}.'}
+                    </div>
                     <Button
-                      onClick={() => open({ view: 'Connect' })}
+                      onClick={openInSafe}
                       className="w-full bg-[#376FFF] text-white rounded-lg"
-                      title={''}
+                      title="Open in Safe"
+                      disabled={likelySafe}
                     >
-                      Connect Wallet
+                      Open in Safe
                     </Button>
+
+                    {!!injectedConnector && !likelySafe && (
+                      <Button
+                        onClick={connectDevWallet}
+                        variant="secondary"
+                        className="w-full rounded-lg mt-2"
+                        disabled={isConnecting}
+                        title="Connect wallet (dev)"
+                      >
+                        {isConnecting ? 'Connecting…' : 'Connect wallet (dev)'}
+                      </Button>
+                    )}
+
                     <div className="mt-2 text-[11px] text-muted-foreground">
-                      Works with WalletConnect & injected wallets
+                      OP-only app. Safe recommended.
                     </div>
                   </>
                 ) : (
@@ -421,8 +445,15 @@ export function Navbar() {
                         <div className="h-7 w-7 rounded-full bg-gradient-to-br from-teal-500 to-cyan-500 ring-1 ring-black/5" />
                         <div className="text-sm font-semibold">{shortAddr(address)}</div>
                       </div>
-                      <NetworkBadge chainId={chainId} />
+                      <NetworkBadge />
                     </div>
+
+                    {onWrongChain && (
+                      <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-2">
+                        You are not on OP Mainnet. Please switch to continue.
+                      </div>
+                    )}
+
                     <div className="mt-2 grid grid-cols-2 gap-2">
                       <Button
                         variant="secondary"
@@ -435,11 +466,22 @@ export function Navbar() {
                       <Button
                         variant="secondary"
                         className="w-full"
-                        onClick={() => open({ view: 'Connect' })}
-                        title={'Switch'}
+                        onClick={openOnOptimismExplorer}
+                        title="Explorer"
                       >
-                        Switch
+                        Explorer
                       </Button>
+
+                      <Button
+                        variant="secondary"
+                        className="col-span-2"
+                        onClick={switchToOP}
+                        disabled={isSwitching || !onWrongChain}
+                        title="Switch to OP"
+                      >
+                        {isSwitching ? 'Switching…' : 'Switch to OP Mainnet'}
+                      </Button>
+
                       <Button
                         variant="destructive"
                         className="col-span-2"
@@ -447,7 +489,7 @@ export function Navbar() {
                           disconnect()
                           setMobileOpen(false)
                         }}
-                        title={'Disconnect'}
+                        title="Disconnect"
                       >
                         Disconnect
                       </Button>

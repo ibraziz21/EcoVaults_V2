@@ -1,21 +1,28 @@
+// src/components/deposit/DepositModal/review-deposit-modal.tsx
 'use client'
 
 import { FC, useMemo, useState, useEffect, useCallback } from 'react'
+import { useAccount, useConnect, useWalletClient } from 'wagmi'
 import Image from 'next/image'
 import { X, Check, ExternalLink, AlertCircle, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useAppKit } from '@reown/appkit/react'
-import { useWalletClient } from 'wagmi'
-import { parseUnits } from 'viem'
+import { parseUnits, type WalletClient } from 'viem'
 import type { YieldSnapshot } from '@/hooks/useYields'
 import lifilogo from '@/public/logo_lifi_light.png'
 import { getBridgeQuote } from '@/lib/quotes'
-import { switchOrAddChain, CHAINS } from '@/lib/wallet'
+import { CHAINS } from '@/lib/wallet'
 import { bridgeTokens } from '@/lib/bridge'
 import { TokenAddresses } from '@/lib/constants'
 import { DepositSuccessModal } from './deposit-success-modal'
 
 type FlowStep = 'idle' | 'bridging' | 'depositing' | 'success' | 'error'
+
+function assertOnOptimism(walletClient: WalletClient) {
+  const current = walletClient.chain?.id
+  if (current && current !== CHAINS.optimism.id) {
+    throw new Error('Please switch your wallet to OP Mainnet to continue.')
+  }
+}
 
 interface ReviewDepositModalProps {
   open: boolean
@@ -23,13 +30,14 @@ interface ReviewDepositModalProps {
   snap: YieldSnapshot
 
   amount: string
-  /** Now supports OP USDT0 + Lisk USDCe/USDT0 */
+  /** OP representations only; Lisk reps are derived server-side / in bridge util */
   sourceSymbol: 'USDC' | 'USDT' | 'USDCe' | 'USDT0'
   destTokenLabel: 'USDCe' | 'USDT0' | 'WETH'
   routeLabel: string
   bridgeFeeDisplay: number
   receiveAmountDisplay: number
 
+  // balances: included in props contract; not required for the modal core flow
   opBal: bigint | null
   baBal: bigint | null
   liBal: bigint | null
@@ -40,12 +48,7 @@ interface ReviewDepositModalProps {
   baUsdtBal: bigint | null
 }
 
-function toTokenDecimals(sym: 'USDC' | 'USDT' | 'WETH' | 'USDCe' | 'USDT0') {
-  return sym === 'WETH' ? 18 : 6
-}
-
 const TAG = '[deposit]'
-
 const ZERO32 = `0x${'0'.repeat(64)}` as `0x${string}`
 
 function randomBytes32(): `0x${string}` {
@@ -53,13 +56,29 @@ function randomBytes32(): `0x${string}` {
   if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
     window.crypto.getRandomValues(bytes)
   } else {
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = Math.floor(Math.random() * 256)
-    }
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
   }
   return `0x${Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('')}` as `0x${string}`
+}
+
+async function ensureConnected(
+  isConnected: boolean,
+  connectors: ReturnType<typeof useConnect>['connectors'],
+  connectAsync: ReturnType<typeof useConnect>['connectAsync'],
+) {
+  if (isConnected) return
+
+  const safeConnector = connectors.find((c) => c.id === 'safe')
+  if (safeConnector) {
+    await connectAsync({ connector: safeConnector })
+    return
+  }
+
+  const injectedConnector = connectors.find((c) => c.id === 'injected')
+  if (!injectedConnector) throw new Error('No wallet connector available')
+  await connectAsync({ connector: injectedConnector })
 }
 
 export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
@@ -75,54 +94,52 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     receiveAmountDisplay,
   } = props
 
-  const { open: openConnect } = useAppKit()
+  const { isConnected } = useAccount()
+  const { connectors, connectAsync } = useConnect()
   const { data: walletClient } = useWalletClient()
-
-  const tokenDecimals = useMemo(
-    () => toTokenDecimals((snap.token as any) === 'WETH' ? 'WETH' : 'USDC'),
-    [snap.token],
-  )
 
   const [step, setStep] = useState<FlowStep>('idle')
   const [error, setError] = useState<string | null>(null)
 
-  // Whether bridging has completed (we've broadcast the LiFi tx from OP)
+  // whether the user has successfully broadcast the OP bridge tx
   const [bridgeOk, setBridgeOk] = useState(false)
 
-  // We now only need to remember the current refId for retrying `/finish`
+  // for retrying finish only (deposit/mint)
   const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
-  const [lastFromTxHash, setLastFromTxHash] = useState<`0x${string}` | null>(
-    null,
-  )
+  const [lastFromTxHash, setLastFromTxHash] = useState<`0x${string}` | null>(null)
 
   // success modal
   const [showSuccess, setShowSuccess] = useState(false)
 
-  const canStart = open && !!walletClient && Number(amount) > 0
+  // reset modal state on open/close
+  useEffect(() => {
+    if (!open) return
+    setStep('idle')
+    setError(null)
+    setBridgeOk(false)
+    setCurrentRefId(null)
+    setLastFromTxHash(null)
+    setShowSuccess(false)
+  }, [open])
+
+  const amountNumber = Number(amount || 0)
+  const canStart = open && Number.isFinite(amountNumber) && amountNumber > 0
 
   const feeDisplay = useMemo(() => bridgeFeeDisplay ?? 0, [bridgeFeeDisplay])
-  const receiveDisplay = useMemo(
-    () => receiveAmountDisplay ?? 0,
-    [receiveAmountDisplay],
-  )
-  const amountNumber = Number(amount || 0)
+  const receiveDisplay = useMemo(() => receiveAmountDisplay ?? 0, [receiveAmountDisplay])
 
-  const sourceDecimals = useMemo(
-    () =>
-      toTokenDecimals(
-        sourceSymbol === 'USDCe' ? 'USDC' : sourceSymbol, // safety
-      ),
-    [sourceSymbol],
-  )
+  // OP-side decimals: USDC/USDT are always 6 in this build.
+  const sourceDecimals = 6
 
   const optimismChainId = CHAINS.optimism.id
-  const liskChainId = CHAINS.lisk.id
+  const liskChainId = 1135 // keep as const in this file for now
 
-  // ---------- Helper: create & sign deposit intent, then POST /api/create-intent ----------
+  /* -------------------------------------------------------------------------- */
+  /* Create + sign deposit intent (OP)                                           */
+  /* -------------------------------------------------------------------------- */
   const createDepositIntent = useCallback(async () => {
     if (!walletClient) throw new Error('No wallet client')
-    if (snap.chain !== 'lisk')
-      throw new Error('Only Lisk deposits are supported in this build')
+    if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
 
     const user = walletClient.account!.address as `0x${string}`
 
@@ -141,7 +158,6 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     const refId = randomBytes32()
     const salt = randomBytes32()
 
-    // EIP-712 domain & types
     const domain = {
       name: 'SuperYLDR',
       version: '1',
@@ -206,22 +222,18 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     })
 
     const json = await res.json().catch(() => null)
-
     if (!res.ok || !json?.ok) {
       console.error(TAG, 'create-intent failed', json)
       throw new Error(json?.error || 'Failed to create deposit intent')
     }
 
-    console.info(TAG, 'create-intent ok', json)
-    return {
-      refId: json.refId as `0x${string}`,
-      digest: json.digest as `0x${string}`,
-      intentToken: json.intentToken as string | undefined,
-    }
-  }, [walletClient, snap.chain, destTokenLabel, amount, sourceDecimals, sourceSymbol, optimismChainId])
+    return { refId: json.refId as `0x${string}` }
+  }, [walletClient, snap.chain, destTokenLabel, amount, sourceSymbol, optimismChainId])
 
-  // ---------- Deposit-only retry ----------
-  async function depositOnlyRetry() {
+  /* -------------------------------------------------------------------------- */
+  /* Retry deposit only (finish)                                                */
+  /* -------------------------------------------------------------------------- */
+  const depositOnlyRetry = useCallback(async () => {
     if (!currentRefId) {
       setError('Missing deposit reference; please try again.')
       setStep('error')
@@ -244,13 +256,11 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       })
 
       const json = await res.json().catch(() => null)
-
       if (!res.ok || !json?.ok) {
         console.error(TAG, 'finish (retry) failed', json)
         throw new Error(json?.error || 'Failed to finalize deposit')
       }
 
-      console.info(TAG, 'finish (retry) ok', json)
       setStep('success')
       setShowSuccess(true)
     } catch (e: any) {
@@ -258,31 +268,35 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       setError(e?.message ?? String(e))
       setStep('error')
     }
-  }
+  }, [currentRefId, lastFromTxHash, optimismChainId])
 
-  async function handleConfirm() {
-    if (!walletClient) {
-      openConnect()
-      return
-    }
+  /* -------------------------------------------------------------------------- */
+  /* Full confirm flow                                                          */
+  /* -------------------------------------------------------------------------- */
+  const handleConfirm = useCallback(async () => {
+    // 0) Ensure connected (Safe first)
+    await ensureConnected(isConnected, connectors, connectAsync)
+
+    // After connecting, wagmi may not have hydrated walletClient *this tick*.
+    if (!walletClient) return
+
     setError(null)
     setBridgeOk(false)
 
     try {
-      if (snap.chain !== 'lisk')
-        throw new Error('Only Lisk deposits are supported in this build')
+      if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
 
-      // Make sure we’re on OP for all user interactions
-      await switchOrAddChain(walletClient, CHAINS.optimism)
+      // 1) Ensure OP (OP-only interactions; no programmatic switching)
+      assertOnOptimism(walletClient)
 
       const user = walletClient.account!.address as `0x${string}`
       const inputAmt = parseUnits(amount || '0', sourceDecimals)
 
-      // 1) Create & sign the deposit intent on OP
+      // 2) Create intent
       const { refId } = await createDepositIntent()
       setCurrentRefId(refId)
 
-      // 2) Get a fresh LiFi quote for minAmount
+      // 3) Fresh quote for minAmount
       setStep('bridging')
       const quote = await getBridgeQuote({
         token: destTokenLabel,
@@ -294,60 +308,46 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       })
 
       const rawMinOut = BigInt(quote.estimate?.toAmountMin ?? '0')
-      const minOut =
-  rawMinOut > 0n ? rawMinOut - 10n : 0n
+      const minOut = rawMinOut > 0n ? rawMinOut - 10n : 0n
       console.info(TAG, 'bridge quote', { minOut: minOut.toString(), quote })
 
-      // 3) Execute bridge on OP → Lisk (destination = relayer, configured in backend)
-const bridgeResult = await bridgeTokens(
-  destTokenLabel,
-  inputAmt,
-  'optimism',
-  'lisk',
-  walletClient,
-  {
-    sourceToken: sourceSymbol,
-    onUpdate: () => {},
-  },
-)
+      // 4) Execute bridge OP → Lisk (to = relayer on Lisk, in bridgeTokens)
+      const bridgeResult = await bridgeTokens(destTokenLabel, inputAmt, 'optimism', 'lisk', walletClient, {
+        sourceToken: sourceSymbol,
+        onUpdate: () => {},
+      })
 
-// ✅ now we rely on the txHash we extract in bridgeTokens
-const fromTxHash: `0x${string}` | undefined = bridgeResult.txHash
+      const fromTxHash: `0x${string}` | undefined = bridgeResult.txHash
+      if (!fromTxHash) throw new Error('Bridge executed but no txHash was captured from LiFi route')
 
-if (!fromTxHash) {
-  // surface a clear error so you see it in the UI / console
-  throw new Error('Bridge executed but no txHash was captured from LiFi route')
-}
+      setLastFromTxHash(fromTxHash)
 
-setLastFromTxHash(fromTxHash)
+      // 5) Attach route info (non-fatal)
+      try {
+        await fetch('/api/relayer/route-progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            refId,
+            fromTxHash,
+            fromChainId: optimismChainId,
+            toChainId: liskChainId,
+          }),
+        })
+      } catch (routeErr) {
+        console.warn(TAG, 'route-progress failed (non-fatal)', routeErr)
+      }
 
-// 4) Attach route info to the intent
-try {
-  await fetch('/api/relayer/route-progress', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      refId,
-      fromTxHash,
-      fromChainId: optimismChainId,
-      toChainId: liskChainId,
-    }),
-  })
-} catch (routeErr) {
-  console.warn(TAG, 'route-progress failed (non-fatal)', routeErr)
-}
-
-
+      // 6) Finish (relayer wait+deposit+mint)
       setBridgeOk(true)
       setStep('depositing')
 
-      // 5) Ask relayer to wait for LiFi + deposit on Lisk + mint on OP
       const finishRes = await fetch('/api/relayer/finish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           refId,
-          fromTxHash: fromTxHash ?? undefined,
+          fromTxHash,
           fromChainId: optimismChainId,
           toChainId: liskChainId,
           minAmount: minOut.toString(),
@@ -355,13 +355,10 @@ try {
       })
 
       const finishJson = await finishRes.json().catch(() => null)
-
       if (!finishRes.ok || !finishJson?.ok) {
         console.error(TAG, 'finish failed', finishJson)
         throw new Error(finishJson?.error || 'Failed to finalize deposit')
       }
-
-      console.info(TAG, 'finish ok', finishJson)
 
       setStep('success')
       setShowSuccess(true)
@@ -370,42 +367,56 @@ try {
       setError(e?.message ?? String(e))
       setStep('error')
     }
-  }
+  }, [
+    isConnected,
+    connectors,
+    connectAsync,
+    walletClient,
+    snap.chain,
+    amount,
+    destTokenLabel,
+    sourceSymbol,
+    optimismChainId,
+    createDepositIntent,
+  ])
 
-  // ---------- UI state mapping ----------
-  const approveState: 'idle' | 'working' | 'done' | 'error' =
-    step === 'idle' ? 'idle' : step === 'error' ? 'error' : 'done'
-
+  /* -------------------------------------------------------------------------- */
+  /* UI derived state                                                           */
+  /* -------------------------------------------------------------------------- */
   const bridgeState: 'idle' | 'working' | 'done' | 'error' =
     step === 'bridging'
       ? 'working'
-      : step === 'depositing' ||
-        step === 'success' ||
-        (step === 'error' && bridgeOk)
+      : step === 'depositing' || step === 'success' || (step === 'error' && bridgeOk)
       ? 'done'
       : step === 'error'
       ? 'error'
       : 'idle'
 
-  const depositState: 'idle' | 'working' | 'done' | 'error' =
-    step === 'depositing'
-      ? 'working'
-      : step === 'success'
-      ? 'done'
-      : step === 'error' && bridgeState === 'done'
+  const bridgeFailedBeforeLanding = step === 'error' && !bridgeOk
+  const depositFailedAfterBridge = step === 'error' && bridgeState === 'done'
+
+  type DotState = 'pending' | 'idle' | 'active' | 'done' | 'error'
+  const dot1: DotState = step === 'idle' ? 'pending' : 'done'
+  const dot2: DotState =
+    step === 'bridging' && !bridgeOk
+      ? 'active'
+      : bridgeFailedBeforeLanding
       ? 'error'
+      : step === 'depositing' || step === 'success' || depositFailedAfterBridge
+      ? 'done'
       : 'idle'
 
-  // ---------- Retry semantics ----------
   const primaryCta =
-    step === 'error'
+    !walletClient
+      ? 'Connect wallet'
+      : step === 'error'
       ? bridgeOk
         ? 'Retry deposit'
         : 'Try again'
       : step === 'idle'
       ? 'Deposit'
       : step === 'bridging'
-      ? `Sign bridge transaction…`
+      ? 'Sign bridge transaction…'
       : step === 'depositing'
       ? 'Depositing…'
       : step === 'success'
@@ -413,6 +424,11 @@ try {
       : 'Working…'
 
   const onPrimary = () => {
+    if (!walletClient && !isConnected) {
+      void handleConfirm()
+      return
+    }
+
     if (step === 'error') {
       if (bridgeOk) {
         void depositOnlyRetry()
@@ -423,47 +439,18 @@ try {
       void handleConfirm()
       return
     }
+
     if (step === 'success') {
       setShowSuccess(true)
       return
     }
+
     if (step === 'idle') {
       void handleConfirm()
       return
     }
   }
 
-  // ---------- Source row visuals (always OP source) ----------
-  const sourceIcon =
-    sourceSymbol === 'USDT'
-      ? '/tokens/usdt-icon.png'
-      : sourceSymbol === 'USDT0'
-      ? '/tokens/usdt0-icon.png'
-      : '/tokens/usdc-icon.png'
-
-  const sourceTokenLabel = sourceSymbol
-  const sourceChainLabel = 'OP Mainnet'
-
-  // ---------- Bridge dots (UI only) ----------
-  const bridgeFailedBeforeLanding = step === 'error' && !bridgeOk
-  const depositFailedAfterBridge = step === 'error' && bridgeState === 'done'
-
-  type DotState = 'pending' | 'idle' | 'active' | 'done' | 'error'
-
-  // Dot 1: Approve spending [token]
-  const dot1: DotState = step === 'idle' ? 'pending' : 'done'
-
-  // Dot 2: Bridge tx signature / confirmation
-  const dot2: DotState =
-    step === 'bridging' && !bridgeOk
-      ? 'active'
-      : bridgeFailedBeforeLanding
-      ? 'error'
-      : step === 'depositing' || step === 'success' || depositFailedAfterBridge
-      ? 'done'
-      : 'idle'
-
-  // ---------- Step hint (intermediate status copy) ----------
   const stepHint = (() => {
     if (step === 'bridging') {
       return 'Bridge in progress. This can take a few minutes depending on network congestion.'
@@ -482,13 +469,19 @@ try {
 
   const isWorking = step === 'bridging' || step === 'depositing'
 
+  const sourceIcon =
+    sourceSymbol === 'USDT'
+      ? '/tokens/usdt-icon.png'
+      : sourceSymbol === 'USDT0'
+      ? '/tokens/usdt0-icon.png'
+      : '/tokens/usdc-icon.png'
+
+  const sourceTokenLabel = sourceSymbol
+  const sourceChainLabel = 'OP Mainnet'
+
   return (
     <div className={`fixed inset-0 z-[100] ${open ? '' : 'pointer-events-none'}`}>
-      <div
-        className={`absolute inset-0 bg-black/50 transition-opacity ${
-          open ? 'opacity-100' : 'opacity-0'
-        }`}
-      />
+      <div className={`absolute inset-0 bg-black/50 transition-opacity ${open ? 'opacity-100' : 'opacity-0'}`} />
       <div className="absolute inset-0 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
         <div
           className={`w-full max-w-lg my-8 rounded-2xl bg-background border border-border shadow-xl overflow-hidden transform transition-all ${
@@ -496,13 +489,8 @@ try {
           }`}
         >
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <h3 className="text-xl font-semibold">
-              {step === 'error' ? 'Review deposit – Error' : 'Review deposit'}
-            </h3>
-            <button
-              onClick={onClose}
-              className="p-2 hover:bg-muted rounded-full"
-            >
+            <h3 className="text-xl font-semibold">{step === 'error' ? 'Review deposit – Error' : 'Review deposit'}</h3>
+            <button onClick={onClose} className="p-2 hover:bg-muted rounded-full">
               <X size={20} />
             </button>
           </div>
@@ -511,100 +499,54 @@ try {
             {/* source */}
             <div className="flex items-start gap-3">
               <div className="relative mt-0.5">
-                <Image
-                  src={sourceIcon}
-                  alt={sourceTokenLabel}
-                  width={40}
-                  height={40}
-                  className="rounded-full"
-                />
-                {/* Square network badge */}
+                <Image src={sourceIcon} alt={sourceTokenLabel} width={40} height={40} className="rounded-full" />
                 <div className="absolute -bottom-0.5 -right-0.5 rounded-sm border-2 border-background">
-                  <Image
-                    src="/networks/op-icon.png"
-                    alt={sourceChainLabel}
-                    width={16}
-                    height={16}
-                    className="rounded-sm"
-                  />
+                  <Image src="/networks/op-icon.png" alt={sourceChainLabel} width={16} height={16} className="rounded-sm" />
                 </div>
               </div>
               <div className="flex-1">
-                <div className="text-2xl font-bold">
-                  {Number(amountNumber).toString()}
-                </div>
+                <div className="text-2xl font-bold">{Number(amountNumber).toString()}</div>
                 <div className="text-xs text-muted-foreground">
-                  ${amountNumber.toFixed(2)} • {sourceTokenLabel} on{' '}
-                  {sourceChainLabel}
+                  ${amountNumber.toFixed(2)} • {sourceTokenLabel} on {sourceChainLabel}
                 </div>
               </div>
             </div>
 
-            {/* bridge – always shown now */}
+            {/* bridge */}
             <div className="space-y-2">
-              {/* Main LI.FI row */}
               <div className="flex items-start gap-3">
-                {/* LI.FI icon (column 1) */}
                 <div className="relative mt-0.5">
-                  <Image
-                    src={lifilogo.src}
-                    alt="bridge"
-                    width={40}
-                    height={40}
-                    className="rounded-full"
-                  />
+                  <Image src={lifilogo.src} alt="bridge" width={40} height={40} className="rounded-full" />
                 </div>
 
-                {/* Main text (column 2) */}
                 <div className="flex-1">
                   <div className="text-lg font-semibold">Bridging via LI.FI</div>
                   <div className="text-xs text-muted-foreground">
                     Bridge Fee: {feeDisplay.toFixed(4)} {sourceSymbol}
                   </div>
-                  <div className="text-xs text-muted-foreground">
-                    {routeLabel}
-                  </div>
+                  <div className="text-xs text-muted-foreground">{routeLabel}</div>
                 </div>
 
-                {/* Explorer link when bridge is done */}
                 {bridgeState === 'done' && (
-                  <a
-                    href="#"
-                    className="text-muted-foreground hover:text-foreground"
-                    onClick={(e) => e.preventDefault()}
-                  >
+                  <a href="#" className="text-muted-foreground hover:text-foreground" onClick={(e) => e.preventDefault()}>
                     <ExternalLink size={16} />
                   </a>
                 )}
               </div>
 
-              {/* Step 1: Approve spending */}
+              {/* dot 1 */}
               <div className="flex items-center gap-3 text-xs">
-                {/* Icon column: same width as main token/Li.Fi icons */}
                 <div className="flex h-10 w-10 items-center justify-center">
-                  {dot1 === 'done' ? (
-                    <Check className="h-3 w-3 text-emerald-500" />
-                  ) : (
-                    <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground/40" />
-                  )}
+                  {dot1 === 'done' ? <Check className="h-3 w-3 text-emerald-500" /> : <span className="inline-block h-2 w-2 rounded-full bg-muted-foreground/40" />}
                 </div>
-
-                {/* Text column */}
                 <div className="flex-1">
-                  {dot1 === 'done'
-                    ? `${sourceTokenLabel} spending approved`
-                    : `Approve ${sourceTokenLabel} spending`}
+                  {dot1 === 'done' ? `${sourceTokenLabel} spending approved` : `Approve ${sourceTokenLabel} spending`}
                 </div>
               </div>
 
-              {/* Step 2: Bridge tx – only visible once user is signing / has signed */}
-              {(step === 'bridging' ||
-                step === 'depositing' ||
-                step === 'success' ||
-                bridgeFailedBeforeLanding ||
-                depositFailedAfterBridge) && (
+              {/* dot 2 */}
+              {(step === 'bridging' || step === 'depositing' || step === 'success' || bridgeFailedBeforeLanding || depositFailedAfterBridge) && (
                 <div className="flex items-center gap-3 text-xs">
-                  {/* Icon column: same width, centered */}
                   <div className="flex h-10 w-10 items-center justify-center">
                     {dot2 === 'error' ? (
                       <AlertCircle className="h-3 w-3 text-red-500" />
@@ -617,13 +559,8 @@ try {
                     )}
                   </div>
 
-                  {/* Text column */}
                   <div className="flex-1">
-                    {dot2 === 'error'
-                      ? 'Signature required'
-                      : dot2 === 'done'
-                      ? 'Bridge transaction confirmed'
-                      : 'Sign bridge transaction'}
+                    {dot2 === 'error' ? 'Signature required' : dot2 === 'done' ? 'Bridge transaction confirmed' : 'Sign bridge transaction'}
                   </div>
                 </div>
               )}
@@ -633,45 +570,25 @@ try {
             <div className="flex items-start gap-3">
               <div className="relative mt-0.5">
                 <Image
-                  src={
-                    destTokenLabel === 'USDT0'
-                      ? '/tokens/usdt0-icon.png'
-                      : destTokenLabel === 'USDCe'
-                      ? '/tokens/usdc-icon.png'
-                      : '/tokens/weth.png'
-                  }
+                  src={destTokenLabel === 'USDT0' ? '/tokens/usdt0-icon.png' : destTokenLabel === 'USDCe' ? '/tokens/usdc-icon.png' : '/tokens/weth.png'}
                   alt={destTokenLabel}
                   width={40}
                   height={40}
                   className="rounded-full"
                 />
-                {/* Square network badge */}
                 <div className="absolute -bottom-0.5 -right-0.5 rounded-sm border-2 border-background">
-                  <Image
-                    src="/networks/lisk.png"
-                    alt="Lisk"
-                    width={16}
-                    height={16}
-                    className="rounded-sm"
-                  />
+                  <Image src="/networks/lisk.png" alt="Lisk" width={16} height={16} className="rounded-sm" />
                 </div>
               </div>
               <div className="flex-1">
-                <div className="text-2xl font-bold">
-                  {(receiveDisplay ?? 0).toFixed(4)}
-                </div>
-                <div className="text-xs text-muted-foreground">
-                  ≈ ${amountNumber.toFixed(2)} • {destTokenLabel} on Lisk
-                </div>
+                <div className="text-2xl font-bold">{(receiveDisplay ?? 0).toFixed(4)}</div>
+                <div className="text-xs text-muted-foreground">≈ ${amountNumber.toFixed(2)} • {destTokenLabel} on Lisk</div>
 
-                {/* Deposit failed status – only when bridge succeeded but deposit errored */}
                 {depositFailedAfterBridge && (
                   <div className="mt-2 flex items-center gap-3 text-xs">
-                    {/* icon column, centered & same width as other icons */}
                     <div className="flex h-10 w-10 items-center justify-center">
                       <AlertCircle className="h-3 w-3 text-red-500" />
                     </div>
-                    {/* text column */}
                     <div className="flex-1">Deposit failed</div>
                   </div>
                 )}
@@ -681,31 +598,16 @@ try {
             {/* vault */}
             <div className="flex items-start gap-3">
               <div className="relative mt-0.5">
-                <Image
-                  src="/protocols/morpho-icon.png"
-                  alt="Morpho"
-                  width={40}
-                  height={40}
-                  className="rounded-lg"
-                />
+                <Image src="/protocols/morpho-icon.png" alt="Morpho" width={40} height={40} className="rounded-lg" />
               </div>
               <div className="flex-1">
                 <div className="text-lg font-semibold">Depositing in Vault</div>
-                <div className="text-xs text-muted-foreground">
-                  Re7 {snap.token} Vault (Morpho Blue)
-                </div>
+                <div className="text-xs text-muted-foreground">Re7 {snap.token} Vault (Morpho Blue)</div>
               </div>
             </div>
 
-            {stepHint && (
-              <div className="text-xs text-muted-foreground">{stepHint}</div>
-            )}
-
-            {error && (
-              <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3">
-                {error}
-              </div>
-            )}
+            {stepHint && <div className="text-xs text-muted-foreground">{stepHint}</div>}
+            {error && <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3">{error}</div>}
           </div>
 
           <div className="px-5 pb-5">
@@ -724,9 +626,7 @@ try {
       {showSuccess && (
         <DepositSuccessModal
           amount={Number(amount || 0)}
-          sourceToken={
-            sourceTokenLabel as 'USDC' | 'USDT' | 'USDCe' | 'USDT0'
-          }
+          sourceToken={sourceTokenLabel as 'USDC' | 'USDT' | 'USDCe' | 'USDT0'}
           destinationAmount={Number(receiveDisplay ?? 0)}
           destinationToken={destTokenLabel}
           vault={`Re7 ${snap.token} Vault (Morpho Blue)`}

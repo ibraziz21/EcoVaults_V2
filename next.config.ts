@@ -1,7 +1,21 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: [
+          // Allow Safe to iframe your app
+          {
+            key: "Content-Security-Policy",
+            value:
+              "frame-ancestors 'self' https://app.safe.global https://*.safe.global https://safe.optimism.io;",
+          },
+        ],
+      },
+    ];
+  },
 };
 
-export default nextConfig;
+module.exports = nextConfig;
