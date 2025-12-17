@@ -13,9 +13,9 @@ import { TokenAddresses } from '@/lib/constants'
 import { WithdrawSuccessModal } from './withdraw-success-modal'
 
 import lifilogo from '@/public/logo_lifi_light.png'
-import InfoIconModal from '../../../../public/info-icon-modal.svg'
-import CheckIconModal from '../../../../public/check-icon-modal.svg'
-import AlertIconModal from '../../../../public/alert-icon-modal.svg'
+import InfoIconModal from '../../../public/info-icon-modal.svg'
+import CheckIconModal from '../../../public/check-icon-modal.svg'
+import AlertIconModal from '../../../public/alert-icon-modal.svg'
 
 /* -------------------------------------------------------------------------- */
 /* Types                                                                      */
