@@ -86,7 +86,7 @@ export const VELODROME_LISK = {
   unstakedFeeModule:      '0x916e0AD2d7e3f446A26b0333Ca37A9e8972030c5',
 } as const
 
-export type ChainId = 'optimism' | 'base' | 'lisk'
+export type ChainId = 'optimism' |'lisk'
 export type TokenSymbol = 'USDC' | 'USDT' | 'USDCe' | 'USDT0' | 'WETH'
 
 /** NEW: Lisk Executor (funds land here; relayer settles & deposits) */
