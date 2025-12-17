@@ -1,105 +1,132 @@
 // src/components/DepositModal.tsx
 'use client'
 
-import { FC, useEffect, useMemo, useState } from 'react'
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { useAppKit } from '@reown/appkit/react'
-import { useWalletClient } from 'wagmi'
-import { keccak256, parseUnits } from 'viem'
-import { getRoutes, executeRoute } from '@lifi/sdk'
-import { optimism, base, lisk as liskChain } from 'viem/chains'
-import type { YieldSnapshot } from '@/hooks/useYields'
-import { quoteUsdceOnLisk, getBridgeQuote } from '@/lib/quotes'
-import { switchOrAddChain, CHAINS } from '@/lib/wallet'
-import { AmountCard } from '../AmountCard'
-import { BalanceStrip } from '../BalanceStrip'
-import { RouteFeesCard } from '../RouteFeesCard'
-import { ProgressSteps } from '../Progress'
-import { ActionBar } from '../ActionBar'
-import { configureLifiWith, bridgeTokens } from '@/lib/bridge'
-import { adapterKeyForSnapshot } from '@/lib/adapters'
-import { trackActiveDeposit, clearActiveDeposit, updateActiveDeposit } from '@/lib/recovery'
+/**
+ * Morpho-only Deposit Modal (Lisk)
+ * - Removes all Aave/Compound logic
+ * - Bridges + deposits to Morpho Blue vaults on Lisk
+ * - Shows simple route/fee info for USDCe via quoteUsdceOnLisk()
+ */
+
+import { FC, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  readWalletBalance,
-  symbolForWalletDisplay,
-  tokenAddrFor,
-} from '../helpers'
-import type { EvmChain, FlowStep } from '../types'
-import { TokenAddresses, RELAYER_LISK } from '@/lib/constants'
-import { depositMorphoOnLiskAfterBridge } from '@/lib/depositor'
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Button } from '@/components/ui/button'
 
-/* ── helpers ───────────────────────────────────────────────────── */
-const VAULT_TOKEN_DECIMALS = 6
-const pow10 = (n: number) => BigInt(10) ** BigInt(n)
-const scaleAmount = (amt: bigint, fromDec: number, toDec: number) => {
-  if (toDec === fromDec) return amt
-  if (toDec > fromDec) return amt * pow10(toDec - fromDec)
-  return amt / pow10(fromDec - toDec)
+import type { YieldSnapshot } from '@/hooks/useYields'
+import { quoteUsdceOnLisk } from '@/lib/quotes'
+import { ensureLiquidity } from '@/lib/smartbridge'
+import { bridgeAndDepositViaRouterPush } from '@/lib/bridge'
+import { adapterKeyForSnapshot } from '@/lib/adapters'
+import { TokenAddresses } from '@/lib/constants'
+import { publicOptimism, publicLisk } from '@/lib/clients'
+import { useWalletClient, useAccount, useConnect } from 'wagmi'
+import { formatUnits, parseUnits } from 'viem'
+import { erc20Abi } from 'viem'
+import {
+  CheckCircle2,
+  Loader2,
+  ArrowRight,
+  ShieldCheck,
+  AlertTriangle,
+  Network,
+} from 'lucide-react'
+
+/* =============================================================================
+   Types / Helpers
+   ============================================================================= */
+
+type EvmChain = 'optimism' | 'lisk'
+
+function clientFor(chain: EvmChain) {
+  if (chain === 'optimism') return publicOptimism
+  return publicLisk
 }
-const applyBuffer998 = (amt: bigint) => (amt * 997n) / 1000n
 
-// Since this modal is Lisk-only now, force the Lisk representation explicitly.
-function toLiskDestLabel(src: YieldSnapshot['token']): 'USDCe' | 'USDT0' | 'WETH' {
-  if (src === 'USDC') return 'USDCe'
-  if (src === 'USDT') return 'USDT0'
-  return 'WETH'
-}
-function randomSalt32(): `0x${string}` {
-  const b = new Uint8Array(32)
-  crypto.getRandomValues(b)
-  // Use keccak to normalize to 0x + 32 bytes hex
-  return keccak256(b) as `0x${string}`
+/** Lisk mapping for bridge preview / resolution */
+function mapCrossTokenForDest(
+  symbol: YieldSnapshot['token'],
+  dest: EvmChain,
+): YieldSnapshot['token'] {
+  if (dest !== 'lisk') return symbol
+  if (symbol === 'USDC') return 'USDCe'
+  if (symbol === 'USDT') return 'USDT0'
+  return symbol // already USDCe/USDT0/WETH
 }
 
-async function waitUntilMinted(refId: `0x${string}`, ctx: {
-  fromTxHash?: `0x${string}`
-  fromChainId?: number
-  toChainId?: number
-  minAmount?: string
-  pollMs?: number
-  timeoutMs?: number
-} = {}) {
-  const { pollMs = 6000, timeoutMs = 15 * 60_000 } = ctx
-  const endAt = Date.now() + timeoutMs
+/** Resolve token address for a chain */
+function tokenAddrFor(
+  symbol: YieldSnapshot['token'],
+  chain: EvmChain,
+): `0x${string}` {
+  const m = TokenAddresses[symbol] as Partial<Record<EvmChain, `0x${string}`>>
+  const addr = m?.[chain]
+  if (!addr) throw new Error(`Token ${symbol} not supported on ${chain}`)
+  return addr
+}
 
-  while (true) {
-    const res = await fetch('/api/relayer/finish', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refId, ...ctx }),
-    })
+/** Read wallet balance for a token on a chain */
+async function readWalletBalance(
+  chain: EvmChain,
+  token: `0x${string}`,
+  user: `0x${string}`,
+): Promise<bigint> {
+  return await clientFor(chain).readContract({
+    address: token,
+    abi: erc20Abi,
+    functionName: 'balanceOf',
+    args: [user],
+  }) as bigint
+}
 
-    // If backend is still working, it should return 202 with { processing:true }.
-    if (res.status === 202) {
-      if (Date.now() > endAt) throw new Error('Timeout finishing settlement')
-      await new Promise(r => setTimeout(r, pollMs))
-      continue
-    }
-
-    // 200 or 4xx/5xx
-    const json = await res.json().catch(() => ({}))
-    if (!res.ok) throw new Error(json?.error || `finish failed (${res.status})`)
-
-    // Only done when MINTED
-    if (json?.status === 'MINTED') return json
-    // Defensive: if backend returns “already” + final
-    if (json?.already || json?.status === 'SUCCESS') return json
-
-    // Otherwise keep polling (treat BRIDGED/DEPOSITING/MINTING as in-progress)
-    await new Promise(r => setTimeout(r, pollMs))
+/** For display: map chosen token to per-chain wallet token symbol. */
+function symbolForWalletDisplay(
+  symbol: YieldSnapshot['token'],
+  chain: EvmChain,
+): YieldSnapshot['token'] {
+  if (chain === 'lisk') {
+    if (symbol === 'USDC') return 'USDCe'
+    if (symbol === 'USDT') return 'USDT0'
+    return symbol // already USDCe/USDT0/WETH
+  } else {
+    // optimism
+    if (symbol === 'USDCe') return 'USDC'
+    if (symbol === 'USDT0') return 'USDT'
+    return symbol
   }
 }
-async function ensureWalletChain(walletClient: any, chainId: number) {
-  // no-op if already on this chain
-  try {
-    // Some wallet clients expose .chain.id; if not, the switch will just be idempotent
-    if ((walletClient as any)?.chain?.id === chainId) return
-  } catch { }
-  await walletClient.request({
-    method: 'wallet_switchEthereumChain',
-    params: [{ chainId: `0x${chainId.toString(16)}` }],
-  })
-}
+
+/* =============================================================================
+   UI Subcomponents (pills/cards)
+   ============================================================================= */
+
+const ChainPill: FC<{ label: string; active?: boolean; subtle?: boolean }> = ({ label, active, subtle }) => (
+  <span
+    className={[
+      'inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium',
+      active ? 'bg-teal-600 text-white' : subtle ? 'bg-gray-100 text-gray-600' : 'bg-gray-200 text-gray-700',
+    ].join(' ')}
+  >
+    <Network className="h-3.5 w-3.5" />
+    {label}
+  </span>
+)
+
+const StatRow: FC<{ label: string; value: string; emphasize?: boolean }> = ({ label, value, emphasize }) => (
+  <div className="flex items-center justify-between text-sm">
+    <span className="text-gray-500">{label}</span>
+    <span className={emphasize ? 'font-semibold' : 'font-medium'}>{value}</span>
+  </div>
+)
+
+/* =============================================================================
+   Main Modal (Morpho-only)
+   ============================================================================= */
 
 interface DepositModalProps {
   open: boolean
@@ -107,57 +134,55 @@ interface DepositModalProps {
   snap: YieldSnapshot
 }
 
+type FlowStep = 'idle' | 'bridging' | 'waitingFunds' | 'depositing' | 'success' | 'error'
+
 export const DepositModal: FC<DepositModalProps> = ({ open, onClose, snap }) => {
-  const { open: openConnect } = useAppKit()
+  const { connect, connectors } = useConnect()
+
+  const openConnect = () => {
+    const safe = connectors.find((c) => c.id === 'safe')
+    const injected = connectors.find((c) => c.id === 'injected')
+    connect({ connector: safe ?? injected ?? connectors[0] })
+  }
+
   const { data: walletClient } = useWalletClient()
 
-  // local state
   const [amount, setAmount] = useState('')
-  const [sourceAsset, setSourceAsset] = useState<'USDC' | 'USDT'>('USDT')
 
-  // balances
+  // Wallet balances
   const [opBal, setOpBal] = useState<bigint | null>(null)
-  const [baBal, setBaBal] = useState<bigint | null>(null)
   const [liBal, setLiBal] = useState<bigint | null>(null)
   const [liBalUSDT, setLiBalUSDT] = useState<bigint | null>(null)
   const [liBalUSDT0, setLiBalUSDT0] = useState<bigint | null>(null)
 
-  // extra source balances for quoting/MAX
-  const [opUsdcBal, setOpUsdcBal] = useState<bigint | null>(null)
-  const [baUsdcBal, setBaUsdcBal] = useState<bigint | null>(null)
-  const [opUsdtBal, setOpUsdtBal] = useState<bigint | null>(null)
-  const [baUsdtBal, setBaUsdtBal] = useState<bigint | null>(null)
-
-  // routing/fee (UI only)
+  // Routing / fees / flow
   const [route, setRoute] = useState<string | null>(null)
   const [fee, setFee] = useState<bigint>(0n)
   const [received, setReceived] = useState<bigint>(0n)
   const [quoteError, setQuoteError] = useState<string | null>(null)
-
-  // flow state
   const [step, setStep] = useState<FlowStep>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [liquidityEnsured, setLiquidityEnsured] = useState(false)
 
+  // bridge tracking (baseline and latest dest balance)
+  const destStartBal = useRef<bigint>(0n)
+  const destCurrBal  = useRef<bigint>(0n)
+
+  // Reset when inputs change
   useEffect(() => {
+    setLiquidityEnsured(false)
     setStep('idle')
     setError(null)
   }, [open, amount, snap.chain, snap.token, snap.protocolKey])
 
   const tokenDecimals = useMemo(() => (snap.token === 'WETH' ? 18 : 6), [snap.token])
 
-  // Lisk dest label (authoritative)
-  const destTokenLabel = useMemo(() => toLiskDestLabel(snap.token), [snap.token])
-
-  // treat as USDT-family if src is USDT or dest is USDT0
-  const isUsdtFamily = useMemo(() => snap.token === 'USDT' || destTokenLabel === 'USDT0', [snap.token, destTokenLabel])
-
-  /* -------- Wallet balances (OP/Base/Lisk) -------- */
+  /* ---------------- Wallet balances (OP/Lisk) ---------------- */
   useEffect(() => {
     if (!open || !walletClient) return
     const user = walletClient.account.address as `0x${string}`
 
     const opSym = symbolForWalletDisplay(snap.token, 'optimism')
-    const baSym = symbolForWalletDisplay(snap.token, 'base')
     const liSym = symbolForWalletDisplay(snap.token, 'lisk')
 
     const addrOrNull = (sym: YieldSnapshot['token'], ch: EvmChain) => {
@@ -165,59 +190,34 @@ export const DepositModal: FC<DepositModalProps> = ({ open, onClose, snap }) => 
     }
 
     const opAddr = addrOrNull(opSym, 'optimism')
-    const baAddr = addrOrNull(baSym, 'base')
     const liAddr = addrOrNull(liSym, 'lisk')
 
     const reads: Promise<bigint | null>[] = [
       opAddr ? readWalletBalance('optimism', opAddr, user) : Promise.resolve(null),
-      baAddr ? readWalletBalance('base', baAddr, user) : Promise.resolve(null),
-      liAddr ? readWalletBalance('lisk', liAddr, user) : Promise.resolve(null),
+      liAddr ? readWalletBalance('lisk',     liAddr, user) : Promise.resolve(null),
     ]
 
-    // Lisk USDT & USDT0 extra
-    const liskUSDTAddr = (TokenAddresses.USDT as any)?.lisk as `0x${string}` | undefined
+    const liskUSDTAddr  = (TokenAddresses.USDT  as any)?.lisk as `0x${string}` | undefined
     const liskUSDT0Addr = (TokenAddresses.USDT0 as any)?.lisk as `0x${string}` | undefined
+    const isUsdtFamily = snap.token === 'USDT' || snap.token === 'USDT0'
+
     if (isUsdtFamily) {
-      reads.push(liskUSDTAddr ? readWalletBalance('lisk', liskUSDTAddr, user) : Promise.resolve(null))
+      reads.push(liskUSDTAddr  ? readWalletBalance('lisk', liskUSDTAddr,  user) : Promise.resolve(null))
       reads.push(liskUSDT0Addr ? readWalletBalance('lisk', liskUSDT0Addr, user) : Promise.resolve(null))
     } else {
       reads.push(Promise.resolve(null), Promise.resolve(null))
     }
 
-    // extra OP/Base USDC+USDT
-    const opUsdc = addrOrNull('USDC', 'optimism')
-    const baUsdc = addrOrNull('USDC', 'base')
-    const opUsdt = addrOrNull('USDT', 'optimism')
-    const baUsdt = addrOrNull('USDT', 'base')
-
-    if (opUsdc) reads.push(readWalletBalance('optimism', opUsdc, user)); else reads.push(Promise.resolve(null))
-    if (baUsdc) reads.push(readWalletBalance('base', baUsdc, user)); else reads.push(Promise.resolve(null))
-    if (opUsdt) reads.push(readWalletBalance('optimism', opUsdt, user)); else reads.push(Promise.resolve(null))
-    if (baUsdt) reads.push(readWalletBalance('base', baUsdt, user)); else reads.push(Promise.resolve(null))
-
     Promise.allSettled(reads).then((vals) => {
-      const v = vals.map((r) => (r.status === 'fulfilled' ? (r as any).value as bigint | null : null))
-      const [op, ba, li, liU, liU0, _opUsdc, _baUsdc, _opUsdt, _baUsdt] = v
+      const [op, li, liU, liU0] = vals.map((r) => (r.status === 'fulfilled' ? (r as any).value as bigint | null : null))
       setOpBal(op ?? null)
-      setBaBal(ba ?? null)
       setLiBal(li ?? null)
       setLiBalUSDT(liU ?? null)
       setLiBalUSDT0(liU0 ?? null)
-      setOpUsdcBal(_opUsdc ?? null)
-      setBaUsdcBal(_baUsdc ?? null)
-      setOpUsdtBal(_opUsdt ?? null)
-      setBaUsdtBal(_baUsdt ?? null)
     })
-  }, [open, walletClient, snap.token, isUsdtFamily])
+  }, [open, walletClient, snap.token])
 
-  /* -------- Source-asset defaulting heuristic -------- */
-  useEffect(() => {
-    if (!amount) return
-    if (snap.chain === 'lisk' && isUsdtFamily) setSourceAsset('USDT')
-    else setSourceAsset('USDC')
-  }, [amount, snap.chain, isUsdtFamily])
-
-  /* -------- Quote (Lisk-only) -------- */
+  /* ---------------- Quote (Morpho-only) ---------------- */
   useEffect(() => {
     if (!walletClient || !amount) {
       setRoute(null); setFee(0n); setReceived(0n); setQuoteError(null)
@@ -225,327 +225,306 @@ export const DepositModal: FC<DepositModalProps> = ({ open, onClose, snap }) => 
     }
 
     const dest = snap.chain as EvmChain
-    if (dest !== 'lisk') {
-      setRoute(null); setFee(0n); setReceived(0n); setQuoteError('Only Lisk deposits are supported')
+    const amt  = parseUnits(amount, tokenDecimals)
+
+    const destOutSymbol = mapCrossTokenForDest(snap.token, dest)
+
+    // Source is always Optimism in this build
+    const src: EvmChain = 'optimism'
+
+    // If already on destination (rare in this UI), it's on-chain
+    if (src === dest) {
+      setRoute('On-chain'); setFee(0n); setReceived(amt); setQuoteError(null)
       return
     }
 
-    const amt = parseUnits(amount, tokenDecimals)
-
-    const pickSrcBy = (o?: bigint | null, b?: bigint | null): 'optimism' | 'base' => {
-      const op = o ?? 0n
-      const ba = b ?? 0n
-      if (op >= amt) return 'optimism'
-      if (ba >= amt) return 'base'
-      return op >= ba ? 'optimism' : 'base'
-    }
-
-    if (destTokenLabel === 'USDT0') {
-      const src = sourceAsset === 'USDC' ? pickSrcBy(opUsdcBal, baUsdcBal) : pickSrcBy(opUsdtBal, baUsdtBal)
-      getBridgeQuote({
-        token: 'USDT0',
-        amount: amt,
-        from: src,
-        to: dest,
-        fromAddress: walletClient.account!.address as `0x${string}`,
-        fromTokenSym: sourceAsset, // << important
-      })
-        .then((q) => { setRoute(q.route); setFee(q.bridgeFeeTotal); setReceived(q.bridgeOutAmount); setQuoteError(null) })
-        .catch(() => { setRoute(null); setFee(0n); setReceived(0n); setQuoteError('Could not fetch bridge quote') })
+    // USDCe on Lisk → show LI.FI-style quote helper
+    if (dest === 'lisk' && destOutSymbol === 'USDCe') {
+      if ((liBal ?? 0n) >= amt) {
+        setRoute('On-chain'); setFee(0n); setReceived(amt); setQuoteError(null)
+        return
+      }
+      quoteUsdceOnLisk({ amountIn: amt, opBal })
+        .then(q => {
+          setRoute(q.route)
+          setFee(q.bridgeFee)
+          setReceived(q.bridgeOutUSDCe)
+          setQuoteError(null)
+        })
+        .catch(() => {
+          setRoute(null)
+          setFee(0n)
+          setReceived(0n)
+          setQuoteError('Could not fetch bridge quote')
+        })
       return
     }
 
-    if (destTokenLabel === 'USDCe') {
-      if ((liBal ?? 0n) >= amt) { setRoute('On-chain'); setFee(0n); setReceived(amt); setQuoteError(null); return }
-      quoteUsdceOnLisk({
-        amountIn: amt,
-        opBal, baBal,
-        fromAddress: walletClient.account!.address as `0x${string}`,
-      })
-        .then((q) => { setRoute(q.route); setFee(q.bridgeFee); setReceived(q.bridgeOutUSDCe); setQuoteError(null) })
-        .catch(() => { setRoute(null); setFee(0n); setReceived(0n); setQuoteError('Could not fetch bridge quote') })
+    // USDT0 on Lisk → bridge USDT then local swap; we skip fee calc and show on-chain
+    if (dest === 'lisk' && destOutSymbol === 'USDT0') {
+      setRoute('On-chain'); setFee(0n); setReceived(amt); setQuoteError(null)
       return
     }
 
-    // WETH to Lisk (no receipts)
+    // WETH on Lisk or anything else → treat as on-chain
     setRoute('On-chain'); setFee(0n); setReceived(amt); setQuoteError(null)
-  }, [
-    amount, walletClient, tokenDecimals, snap.chain, snap.token, destTokenLabel,
-    opBal, baBal, liBal, liBalUSDT, liBalUSDT0,
-    sourceAsset, opUsdcBal, baUsdcBal, opUsdtBal, baUsdtBal,
-  ])
+  }, [amount, walletClient, opBal, liBal, liBalUSDT, liBalUSDT0, snap.chain, snap.token, tokenDecimals])
 
-  const VAULT_TOKEN_DECIMALS_ = 6
-  const pow10_ = (n: number) => BigInt(10) ** BigInt(n)
-  const scaleAmount_ = (amt: bigint, fromDec: number, toDec: number) => {
-    if (toDec === fromDec) return amt
-    if (toDec > fromDec) return amt * pow10_(toDec - fromDec)
-    return amt / pow10_(fromDec - toDec)
-  }
-  const applyBuffer998_ = (amt: bigint) => (amt * 997n) / 1000n
-
-  // quick 32-byte random refId
-  function randomRefId(): `0x${string}` {
-    const b = new Uint8Array(32)
-    crypto.getRandomValues(b)
-    // tiny hash to uniformize
-    const h = keccak256(b)
-    return h as `0x${string}`
-  }
-
-  // tap hashes from a Li.Fi route update (origin/dest)
-  function tapHashes(route: any) {
-    const steps = route?.steps || []
-    const first = steps[0]
-    const last = steps[steps.length - 1]
-
-    const originProc = first?.execution?.process?.find((p: any) => p?.txHash)
-    const destProc = last?.execution?.process?.find((p: any) => p?.txHash)
-
-    return {
-      fromTxHash: originProc?.txHash as `0x${string}` | undefined,
-      toTxHash: destProc?.txHash as `0x${string}` | undefined,
-      fromChainId: route?.fromChainId ?? first?.action?.fromChainId,
-      toChainId: route?.toChainId ?? last?.action?.toChainId,
-      toAddress: last?.action?.toAddress,
-      toTokenAddress: last?.action?.toToken?.address,
-      toTokenSymbol: last?.action?.toToken?.symbol,
-    }
-  }
-
-  /* ──────────────────────────────────────────────────────────
-     NEW handleConfirm: user-recipient bridging + user deposit
-     ────────────────────────────────────────────────────────── */
-
+  /* ---------------- Confirm (Morpho-only) ---------------- */
   async function handleConfirm() {
     if (!walletClient) { openConnect(); return }
     setError(null)
 
-    const waitForLiskBalanceAtLeast = async ({
-      user, tokenAddr, target, start = 0n, pollMs = 5000, timeoutMs = 12 * 60_000,
-    }: {
-      user: `0x${string}`; tokenAddr: `0x${string}`; target: bigint; start?: bigint; pollMs?: number; timeoutMs?: number
-    }) => {
-      const endAt = Date.now() + timeoutMs
-      let last = start
-      while (true) {
-        const bal = await readWalletBalance('lisk', tokenAddr, user).catch(() => null)
-        if (bal !== null) {
-          last = bal
-          if (bal >= target) return bal
-        }
-        if (Date.now() > endAt) throw new Error(`Bridging not finalized on Lisk: balance ${last} < required ${target}`)
-        await new Promise(r => setTimeout(r, pollMs))
-      }
-    }
-
     try {
+      if (snap.protocolKey !== 'morpho-blue' || snap.chain !== 'lisk') {
+        throw new Error('This build only supports Morpho Blue deposits on Lisk.')
+      }
+
       const inputAmt = parseUnits(amount || '0', tokenDecimals)
+      const dest = 'lisk' as const
       const user = walletClient.account!.address as `0x${string}`
-      if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
+      const destTokenLabel = mapCrossTokenForDest(snap.token, dest) as 'USDCe'|'USDT0'|'WETH'
+      const adapterKey = adapterKeyForSnapshot(snap)
 
-      const destLabel: 'USDCe' | 'USDT0' | 'WETH' =
-        snap.token === 'USDC' ? 'USDCe' :
-          snap.token === 'USDT' ? 'USDT0' : 'WETH'
+      // Source chain is fixed to Optimism
+      const srcChain = 'optimism' as const
 
-      const destTokenAddr =
-        destLabel === 'USDCe' ? (TokenAddresses.USDCe.lisk as `0x${string}`) :
-          destLabel === 'USDT0' ? (TokenAddresses.USDT0.lisk as `0x${string}`) :
-            (TokenAddresses.WETH.lisk as `0x${string}`)
+      // Map to source token symbol expected by the router
+      const srcToken =
+        destTokenLabel === 'USDCe' ? 'USDC' :
+        destTokenLabel === 'USDT0' ? 'USDT' : 'WETH'
 
-      if (destLabel === 'USDCe' && (liBal ?? 0n) >= inputAmt) {
-        setStep('depositing')
-        await ensureWalletChain(walletClient, liskChain.id)
-        await depositMorphoOnLiskAfterBridge(snap, inputAmt, walletClient)
-        setStep('success')
-        return
-      }
-      if (destLabel === 'USDT0' && (liBalUSDT0 ?? 0n) >= inputAmt) {
-        setStep('depositing')
-        await ensureWalletChain(walletClient, liskChain.id)
-        await depositMorphoOnLiskAfterBridge(snap, inputAmt, walletClient)
-        setStep('success')
-        return
-      }
-
-      const pickSrcBy = (o?: bigint | null, b?: bigint | null): 'optimism' | 'base' => {
-        const op = o ?? 0n, ba = b ?? 0n
-        if (op >= inputAmt) return 'optimism'
-        if (ba >= inputAmt) return 'base'
-        return op >= ba ? 'optimism' : 'base'
-      }
-
-      const srcToken: 'USDC' | 'USDT' | 'WETH' =
-        destLabel === 'USDT0' ? sourceAsset :
-          destLabel === 'USDCe' ? 'USDC' : 'WETH'
-
-      const srcChain: 'optimism' | 'base' =
-        srcToken === 'USDC' ? pickSrcBy(opUsdcBal, baUsdcBal) :
-          srcToken === 'USDT' ? pickSrcBy(opUsdtBal, baUsdtBal) :
-            pickSrcBy(opBal, baBal)
-
+      // Bridge (if needed) + Deposit via router push (relayer path)
       setStep('bridging')
-
-      const preBal = (await readWalletBalance('lisk', destTokenAddr, user).catch(() => 0n)) as bigint
-
-      // Quote to get a conservative minOut
-      const q = await getBridgeQuote({
-        token: destLabel, amount: inputAmt, from: srcChain, to: 'lisk',
-        fromAddress: user, fromTokenSym: srcToken === 'WETH' ? undefined : srcToken,
-      })
-      const minOut = BigInt(q.estimate?.toAmountMin ?? '0')
-
-      const srcViem = srcChain === 'optimism' ? CHAINS.optimism : CHAINS.base
-      await switchOrAddChain(walletClient, srcViem)
-      await bridgeTokens(destLabel, inputAmt, srcChain, 'lisk', walletClient, {
-        sourceToken: srcToken === 'WETH' ? undefined : srcToken,
-        onUpdate: () => { },
-      })
-
-      // Wait for funds to land on user’s Lisk wallet
-      await waitForLiskBalanceAtLeast({
+      await bridgeAndDepositViaRouterPush({
         user,
-        tokenAddr: destTokenAddr,
-        target: preBal + (minOut > 0n ? minOut : 1n),
-        start: preBal,
-        pollMs: 6000,
-        timeoutMs: 15 * 60_000,
+        destToken: destTokenLabel,
+        srcChain,
+        srcToken: srcToken as 'USDC' | 'USDT' | 'WETH',
+        amount: inputAmt,
+        adapterKey,
+        walletClient,
       })
 
-      setStep('depositing')
-      await ensureWalletChain(walletClient, liskChain.id)
-
-      await switchOrAddChain(walletClient, CHAINS.lisk)
-      await depositMorphoOnLiskAfterBridge(snap, minOut > 0n ? minOut : inputAmt, walletClient)
-      
-
+      // Success
       setStep('success')
-    } catch (e: any) {
-      console.error('[ui] deposit error (bridgeTokens path)', e)
+    } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setStep('error')
     }
   }
 
+  /* =============================================================================
+     Derived UI values
+     ============================================================================= */
+  const pretty = (bn: bigint | null | undefined, dec = tokenDecimals) => bn != null ? formatUnits(bn, dec) : '…'
 
-
-  /* -------- UI flags -------- */
   const hasAmount = amount.trim().length > 0 && Number(amount) > 0
   const confirmDisabled = step !== 'idle' ? true : !hasAmount || Boolean(quoteError)
+
   const showForm = step === 'idle'
   const showProgress = step !== 'idle' && step !== 'success' && step !== 'error'
   const showSuccess = step === 'success'
   const showError = step === 'error'
-  const isLiskTarget = snap.chain === 'lisk'
 
+  const isLiskTarget = snap.chain === 'lisk'
+  const isUsdtFamily = snap.token === 'USDT' || snap.token === 'USDT0'
+  const destTokenLabel = mapCrossTokenForDest(snap.token, snap.chain as EvmChain)
+
+  /* =============================================================================
+     Render
+     ============================================================================= */
   return (
     <Dialog open={open} onOpenChange={onClose}>
       <DialogContent className="p-0 overflow-hidden shadow-xl w-[min(100vw-1rem,44rem)] sm:max-w-2xl rounded-xl">
+        {/* Header */}
         <div className="bg-gradient-to-r from-teal-600 to-cyan-500 px-5 py-4">
           <DialogHeader>
             <DialogTitle className="text-white text-base font-semibold sm:text-lg flex items-center gap-2">
               <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-white text-xs font-bold">
                 {destTokenLabel}
               </span>
-              Deposit to {snap.protocol} on <span className="underline decoration-white/40 underline-offset-4">
-                {(snap.chain as string).toUpperCase()}
-              </span>
+              Deposit to {snap.protocol} on <span className="underline decoration-white/40 underline-offset-4">{(snap.chain as string).toUpperCase()}</span>
             </DialogTitle>
           </DialogHeader>
         </div>
 
+        {/* Body */}
         <div className="flex max-h-[85dvh] flex-col">
           <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6 bg-white">
             {showForm && (
               <>
-                <AmountCard
-                  amount={amount}
-                  setAmount={setAmount}
-                  tokenDecimals={tokenDecimals}
-                  snap={snap}
-                  isLiskTarget={isLiskTarget}
-                  destTokenLabel={destTokenLabel}
-                  isUsdtFamily={isUsdtFamily}
-                  opBal={opBal}
-                  baBal={baBal}
-                  liBal={liBal}
-                  liBalUSDT={liBalUSDT}
-                  liBalUSDT0={liBalUSDT0}
-                  sourceAsset={sourceAsset}
-                  opUsdcBal={opUsdcBal}
-                  baUsdcBal={baUsdcBal}
-                  opUsdtBal={opUsdtBal}
-                  baUsdtBal={baUsdtBal}
-                />
-
-                {isLiskTarget && destTokenLabel === 'USDT0' && (
-                  <div className="flex items-center justify-between rounded-lg border p-3">
-                    <div className="text-xs text-muted-foreground">Source asset on OP/Base</div>
-                    <div className="inline-flex rounded-md bg-gray-100 p-1">
-                      {(['USDC', 'USDT'] as const).map(a => (
-                        <button
-                          key={a}
-                          type="button"
-                          onClick={() => setSourceAsset(a)}
-                          className={` cursor-pointer px-3 py-1 text-xs rounded ${sourceAsset === a ? 'bg-white shadow font-medium' : 'opacity-70'}`}
-                        >
-                          {a}
-                        </button>
-                      ))}
+                {/* Amount Card */}
+                <div className="rounded-xl border border-gray-200 bg-white">
+                  <div className="p-4 sm:p-5">
+                    <div className="flex items-center justify-between">
+                      <div className="text-xs text-gray-500">Amount</div>
+                      <div className="flex items-center gap-2">
+                        <ChainPill label={(snap.chain as string).toUpperCase()} subtle />
+                        <span className="text-[11px] text-gray-500">Destination token: {destTokenLabel}</span>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex items-center gap-3">
+                      <Input
+                        type="text"
+                        inputMode="decimal"
+                        pattern="[0-9]*[.,]?[0-9]*"
+                        placeholder="0.00"
+                        value={amount}
+                        onChange={(e) => setAmount(e.target.value.replace(',', '.'))}
+                        className="h-12 text-2xl font-bold border-0 bg-gray-50 focus-visible:ring-0"
+                        autoFocus
+                      />
+                      <span className="text-gray-600 font-semibold">{snap.token}</span>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button variant="secondary" size="sm" onClick={() => setAmount('')} title="Clear">Clear</Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          const dec = tokenDecimals
+                          const amt = (() => {
+                            if (isLiskTarget && isUsdtFamily) {
+                              // choose larger of Lisk USDT or USDT0 for convenience
+                              const a = liBalUSDT ?? 0n
+                              const b = liBalUSDT0 ?? 0n
+                              return formatUnits(a > b ? a : b, dec)
+                            }
+                            if (isLiskTarget) {
+                              return formatUnits(liBal ?? 0n, dec)
+                            }
+                            // OP balance for cross-chain sourcing
+                            return formatUnits(opBal ?? 0n, dec)
+                          })()
+                          setAmount(amt === '0' ? '' : amt)
+                        }}
+                        title="Max"
+                      >
+                        MAX
+                      </Button>
                     </div>
                   </div>
-                )}
 
-                <BalanceStrip
-                  tokenDecimals={tokenDecimals}
-                  snap={snap}
-                  isLiskTarget={isLiskTarget}
-                  isUsdtFamily={isUsdtFamily}
-                  symbolForWalletDisplay={symbolForWalletDisplay}
-                  opBal={opBal}
-                  baBal={baBal}
-                  liBal={liBal}
-                  liBalUSDT={liBalUSDT}
-                  liBalUSDT0={liBalUSDT0}
-                  opUsdcBal={opUsdcBal}
-                  baUsdcBal={baUsdcBal}
-                  opUsdtBal={opUsdtBal}
-                  baUsdtBal={baUsdtBal}
-                />
+                  {/* Balance strip */}
+                  <div className="border-t bg-gray-50 p-3 sm:p-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {/* OP */}
+                      <div className="rounded-lg border bg-white p-3">
+                        <div className="flex items-center justify-between">
+                          <ChainPill label="OP" />
+                          <span className="text-[11px] text-gray-500">
+                            {symbolForWalletDisplay(snap.token, 'optimism')}
+                          </span>
+                        </div>
+                        <div className="mt-1 text-base font-semibold">{pretty(opBal)}</div>
+                      </div>
+                      {/* Lisk */}
+                      <div className="rounded-lg border bg-white p-3">
+                        <div className="flex items-center justify-between">
+                          <ChainPill label="LISK" />
+                          <span className="text-[11px] text-gray-500">
+                            {symbolForWalletDisplay(snap.token, 'lisk')}
+                          </span>
+                        </div>
+                        {isLiskTarget && isUsdtFamily ? (
+                          <div className="mt-1 space-y-1">
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-gray-500">USDT</span>
+                              <span className="font-medium">{pretty(liBalUSDT)}</span>
+                            </div>
+                            <div className="flex items-center justify-between text-sm">
+                              <span className="text-gray-500">USDT0</span>
+                              <span className="font-medium">{pretty(liBalUSDT0)}</span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="mt-1 text-base font-semibold">{pretty(liBal)}</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
 
-                <RouteFeesCard
-                  route={route}
-                  fee={fee}
-                  received={received}
-                  tokenDecimals={tokenDecimals}
-                  tokenSymbol={snap.token}
-                  quoteError={quoteError}
-                  destChainLabel={(snap.chain as string).toUpperCase()}
-                  destTokenLabel={destTokenLabel}
-                  sourceAsset={isLiskTarget && destTokenLabel === 'USDT0' ? sourceAsset : undefined}
-                />
+                {/* Route & Fees */}
+                <div className="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-sm font-medium">
+                      <ShieldCheck className="h-4 w-4" />
+                      Route & Fees
+                    </div>
+                    {route && route !== 'On-chain' ? (
+                      <span className="inline-flex items-center gap-2 text-xs text-gray-500">
+                        <span className="rounded-md bg-gray-100 px-2 py-1">Bridging via Li.Fi</span>
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-500">On-chain</span>
+                    )}
+                  </div>
+
+                  {/* Pretty route line */}
+                  <div className="mt-3 flex items-center gap-2 text-sm">
+                    <ChainPill label="OP" subtle />
+                    <ArrowRight className="h-4 w-4 text-gray-400" />
+                    <ChainPill label={(snap.chain as string).toUpperCase()} subtle />
+                    <span className="ml-auto text-xs text-gray-500">
+                      {snap.token} → {destTokenLabel}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 space-y-1.5">
+                    {fee > 0n && (
+                      <StatRow
+                        label="Bridge fee"
+                        value={`${formatUnits(fee, tokenDecimals)} ${snap.token}`}
+                      />
+                    )}
+                    <StatRow
+                      label="Will deposit"
+                      value={`${formatUnits(received, tokenDecimals)} ${snap.token}`}
+                      emphasize
+                    />
+                    {quoteError && (
+                      <div className="text-xs text-red-600 flex items-center gap-1">
+                        <AlertTriangle className="h-3.5 w-3.5" /> {quoteError}
+                      </div>
+                    )}
+                  </div>
+
+                  {isLiskTarget && (
+                    <div className="mt-3 text-[11px] text-gray-500">
+                      Funds arrive as <span className="font-medium">{destTokenLabel}</span> on Lisk.
+                    </div>
+                  )}
+                </div>
 
                 {error && <p className="text-xs text-red-600">{error}</p>}
               </>
             )}
 
-            <ProgressSteps step={step} show={showProgress} crossChain />
+            {/* Progress */}
+            {showProgress && (
+              <div className="space-y-3">
+                <StepCard current={step} label="Bridging liquidity"   k="bridging" />
+                <StepCard current={step} label="Waiting for funds"    k="waitingFunds" />
+                <StepCard current={step} label="Depositing to Morpho" k="depositing" />
+              </div>
+            )}
 
+            {/* Success */}
             {showSuccess && (
               <div className="flex flex-col items-center gap-3 py-6">
-                <svg className="h-10 w-10 text-green-600" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M9 12l2 2 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                  <path d="M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z" stroke="currentColor" strokeWidth="2" />
-                </svg>
+                <CheckCircle2 className="h-10 w-10 text-green-600" />
                 <div className="text-center">
                   <div className="text-lg font-semibold">Deposit successful</div>
                   <div className="mt-1 text-sm text-muted-foreground">
-                    Your {snap.token} was bridged to Lisk and deposited to Morpho from your wallet.
+                    Your {snap.token} was bridged to Lisk and deposited into Morpho.
                   </div>
                 </div>
               </div>
             )}
 
+            {/* Error */}
             {showError && (
               <div className="flex flex-col items-center gap-3 py-6">
                 <div className="text-lg font-semibold text-red-600">Transaction failed</div>
@@ -554,15 +533,91 @@ export const DepositModal: FC<DepositModalProps> = ({ open, onClose, snap }) => 
             )}
           </div>
 
-          <ActionBar
-            step={step}
-            confirmDisabled={confirmDisabled}
-            onConfirm={handleConfirm}
-            onClose={onClose}
-            onRetry={() => setStep('idle')}
-          />
+          {/* Sticky action bar */}
+          <div className="sticky bottom-0 border-t bg-white px-4 py-3 sm:px-6">
+            <div className="flex w-full flex-col gap-2 sm:flex-row sm:justify-end">
+              {showForm && (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={onClose}
+                    title="Cancel"
+                    className="h-12 w-full sm:h-9 sm:w-auto"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleConfirm}
+                    disabled={confirmDisabled}
+                    title="Confirm"
+                    className="h-12 w-full sm:h-9 sm:w-auto"
+                  >
+                    Confirm
+                  </Button>
+                </>
+              )}
+
+              {showProgress && (
+                <Button
+                  variant="outline"
+                  onClick={onClose}
+                  title="Close"
+                  className="h-12 w-full sm:h-9 sm:w-auto"
+                >
+                  Close
+                </Button>
+              )}
+
+              {showSuccess && (
+                <Button onClick={onClose} title="Done" className="h-12 w-full sm:h-9 sm:w-auto">
+                  Done
+                </Button>
+              )}
+
+              {showError && (
+                <div className="flex w-full gap-2 sm:justify-end">
+                  <Button
+                    variant="outline"
+                    onClick={() => setStep('idle')}
+                    title="Try Again"
+                    className="h-12 w-full sm:h-9 sm:w-auto"
+                  >
+                    Try again
+                  </Button>
+                  <Button onClick={onClose} title="Close" className="h-12 w-full sm:h-9 sm:w-auto">
+                    Close
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/* =============================================================================
+   Tiny Step Card
+   ============================================================================= */
+
+function StepCard(props: { current: FlowStep, k: Exclude<FlowStep, 'idle'|'success'|'error'>, label: string }) {
+  const order: FlowStep[] = ['bridging', 'waitingFunds', 'depositing']
+  const idx = order.indexOf(props.current)
+  const my  = order.indexOf(props.k)
+  const done = idx > my
+  const active = idx === my
+  return (
+    <div className="flex items-center gap-3 rounded-lg border p-3">
+      {done ? (
+        <CheckCircle2 className="h-4 w-4 text-green-600" />
+      ) : active ? (
+        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+      ) : (
+        <span className="h-4 w-4 rounded-full border" />)}
+      <span className={`text-sm ${done ? 'text-green-700' : active ? 'text-primary' : 'text-muted-foreground'}`}>
+        {props.label}
+      </span>
+    </div>
   )
 }

@@ -1,21 +1,18 @@
+// src/components/deposit/DepositModal/review-deposit-modal.tsx
 'use client'
 
 import { FC, useMemo, useState, useEffect, useCallback } from 'react'
 import Image from 'next/image'
 import { X, ExternalLink, Clock, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useAppKit } from '@reown/appkit/react'
-import { useWalletClient } from 'wagmi'
-import { parseUnits } from 'viem'
+import { useAccount, useConnect, useWalletClient } from 'wagmi'
+import { parseUnits, type WalletClient } from 'viem'
 import type { YieldSnapshot } from '@/hooks/useYields'
 import lifilogo from '@/public/lifi.png'
 import { getBridgeQuote } from '@/lib/quotes'
-import { switchOrAddChain, CHAINS } from '@/lib/wallet'
+import { CHAINS } from '@/lib/wallet'
 import { bridgeTokens } from '@/lib/bridge'
 import { TokenAddresses } from '@/lib/constants'
-import { readWalletBalance } from '../helpers'
-import { depositMorphoOnLiskAfterBridge } from '@/lib/depositor'
-import { switchOrAddChainStrict } from '@/lib/switch'
 import InfoIconModal from '../../../../public/info-icon-modal.svg'
 import CheckIconModal from '../../../../public/check-icon-modal.svg'
 import AlertIconModal from '../../../../public/alert-icon-modal.svg'
@@ -44,6 +41,7 @@ interface ReviewDepositModalProps {
   bridgeFeeDisplay: number
   receiveAmountDisplay: number
 
+  // balances: included in props contract; not required for the modal core flow
   opBal: bigint | null
   baBal: bigint | null
   liBal: bigint | null
@@ -54,15 +52,49 @@ interface ReviewDepositModalProps {
   baUsdtBal: bigint | null
 }
 
+const TAG = '[deposit]'
+const ZERO32 = `0x${'0'.repeat(64)}` as `0x${string}`
+
 function opTxUrl(hash: `0x${string}`) {
   return `https://optimistic.etherscan.io/tx/${hash}`
 }
 
-function toTokenDecimals(sym: 'USDC' | 'USDT' | 'WETH' | 'USDCe' | 'USDT0') {
-  return sym === 'WETH' ? 18 : 6
+function randomBytes32(): `0x${string}` {
+  const bytes = new Uint8Array(32)
+  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes)
+  } else {
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256)
+  }
+  return `0x${Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')}` as `0x${string}`
 }
 
-const TAG = '[deposit]'
+function assertOnOptimism(walletClient: WalletClient) {
+  const current = walletClient.chain?.id
+  if (current && current !== CHAINS.optimism.id) {
+    throw new Error('Please switch your wallet to OP Mainnet to continue.')
+  }
+}
+
+async function ensureConnected(
+  isConnected: boolean,
+  connectors: ReturnType<typeof useConnect>['connectors'],
+  connectAsync: ReturnType<typeof useConnect>['connectAsync'],
+) {
+  if (isConnected) return
+
+  const safeConnector = connectors.find((c) => c.id === 'safe')
+  if (safeConnector) {
+    await connectAsync({ connector: safeConnector })
+    return
+  }
+
+  const injectedConnector = connectors.find((c) => c.id === 'injected')
+  if (!injectedConnector) throw new Error('No wallet connector available')
+  await connectAsync({ connector: injectedConnector })
+}
 
 function StepHintRow({ hint }: { hint: string }) {
   return (
@@ -76,88 +108,6 @@ function StepHintRow({ hint }: { hint: string }) {
       </div>
     </div>
   )
-}
-
-/**
- * Poll for token landing on Lisk without a fixed 60s sleep.
- * - polls immediately
- * - also re-checks on focus/visibility change
- * - avoids "stuck until click" symptoms
- */
-async function waitForLanding(params: {
-  destAddr: `0x${string}`
-  user: `0x${string}`
-  preBal: bigint
-  timeoutMs?: number
-  intervalMs?: number
-}): Promise<{ landed: bigint; last: bigint }> {
-  const { destAddr, user, preBal, timeoutMs = 15 * 60_000, intervalMs = 6_000 } = params
-
-  let last = preBal
-  const start = Date.now()
-
-  const read = async () => {
-    const bal = await readWalletBalance('lisk', destAddr, user).catch(() => null)
-    if (bal === null) return null
-    last = bal
-    const delta = bal - preBal
-    return delta > 0n ? delta : null
-  }
-
-  return new Promise((resolve, reject) => {
-    let done = false
-    let timer: any = null
-
-    const cleanup = () => {
-      if (timer) clearInterval(timer)
-      window.removeEventListener('focus', onFocus)
-      document.removeEventListener('visibilitychange', onVis)
-    }
-
-    const succeed = (landed: bigint) => {
-      if (done) return
-      done = true
-      cleanup()
-      resolve({ landed, last })
-    }
-
-    const fail = () => {
-      if (done) return
-      done = true
-      cleanup()
-      reject(
-        new Error(
-          `Bridging not finalized on Lisk in time. Last balance ${last.toString()}, start ${preBal.toString()}.`,
-        ),
-      )
-    }
-
-    const tick = async () => {
-      if (done) return
-      if (Date.now() - start > timeoutMs) {
-        fail()
-        return
-      }
-      try {
-        const landed = await read()
-        if (landed && landed > 0n) succeed(landed)
-      } catch {
-        // ignore transient read errors
-      }
-    }
-
-    const onFocus = () => void tick()
-    const onVis = () => {
-      if (document.visibilityState === 'visible') void tick()
-    }
-
-    window.addEventListener('focus', onFocus)
-    document.addEventListener('visibilitychange', onVis)
-
-    // immediate check + interval
-    void tick()
-    timer = setInterval(tick, intervalMs)
-  })
 }
 
 export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
@@ -174,326 +124,47 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     receiveAmountDisplay,
   } = props
 
-  const { open: openConnect } = useAppKit()
-  const { data: walletClient, refetch: refetchWalletClient } = useWalletClient()
-
-  const tokenDecimals = useMemo(
-    () => toTokenDecimals((snap.token as any) === 'WETH' ? 'WETH' : 'USDC'),
-    [snap.token],
-  )
+  const { isConnected } = useAccount()
+  const { connectors, connectAsync } = useConnect()
+  const { data: walletClient } = useWalletClient()
 
   const [step, setStep] = useState<FlowStep>('idle')
   const [error, setError] = useState<string | null>(null)
 
-  // recovery-aware caches
-  const [bridgeOk, setBridgeOk] = useState(false)
-  const [cachedInputAmt, setCachedInputAmt] = useState<bigint | null>(null)
-  const [cachedMinOut, setCachedMinOut] = useState<bigint | null>(null)
-
-  // destination token (for polling/deposit)
-  const [destAddr, setDestAddr] = useState<`0x${string}` | null>(null)
-  const [preBal, setPreBal] = useState<bigint>(0n)
-
-  // UI flags
-  const [approvalDone, setApprovalDone] = useState(false)
+  // progress flags for UI
+  const [bridgeOk, setBridgeOk] = useState(false) // means: OP bridge tx broadcast succeeded
   const [bridgeTxHash, setBridgeTxHash] = useState<`0x${string}` | null>(null)
   const [bridgeSubmitted, setBridgeSubmitted] = useState(false)
-  const [bridgeDone, setBridgeDone] = useState(false) // ✅ only true once route finishes
+  const [bridgeDone, setBridgeDone] = useState(false)
 
-  const canStart = open && !!walletClient && Number(amount) > 0
+  // for retrying finish only
+  const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
+  const [lastFromTxHash, setLastFromTxHash] = useState<`0x${string}` | null>(null)
+
+  // reset modal state on open
+  useEffect(() => {
+    if (!open) return
+    setStep('idle')
+    setError(null)
+    setBridgeOk(false)
+    setBridgeTxHash(null)
+    setBridgeSubmitted(false)
+    setBridgeDone(false)
+    setCurrentRefId(null)
+    setLastFromTxHash(null)
+  }, [open])
+
+  const amountNumber = Number(amount || 0)
+  const canStart = open && !!walletClient && Number.isFinite(amountNumber) && amountNumber > 0
 
   const feeDisplay = useMemo(() => bridgeFeeDisplay ?? 0, [bridgeFeeDisplay])
   const receiveDisplay = useMemo(() => receiveAmountDisplay ?? 0, [receiveAmountDisplay])
-  const amountNumber = Number(amount || 0)
 
-  function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-    return Promise.race([
-      p,
-      new Promise<T>((_, rej) =>
-        setTimeout(() => rej(new Error(`${label} (>${ms}ms)`)), ms),
-      ),
-    ])
-  }
+  // OP-side decimals in this build: USDC/USDT/USDT0/USDCe (representations) are 6
+  const sourceDecimals = 6
 
-  /** Ensure wallet on Lisk and return a **fresh** wallet client after switch */
-  const ensureLiskWalletClient = useCallback(async () => {
-    if (!walletClient) throw new Error('No wallet client')
-
-    await withTimeout(
-      switchOrAddChainStrict(walletClient, CHAINS.lisk),
-      20_000,
-      'Chain switch to Lisk timed out',
-    )
-
-    for (let i = 0; i < 10; i++) {
-      const refreshed =
-        (await withTimeout(refetchWalletClient(), 10_000, 'Refetch wallet client timed out')).data ??
-        walletClient
-
-      const chainId = refreshed?.chain?.id
-      if (chainId === CHAINS.lisk.id) return refreshed
-      await new Promise((r) => setTimeout(r, 400))
-    }
-
-    throw new Error('Wallet did not switch to Lisk (chain id not updated)')
-  }, [walletClient, refetchWalletClient])
-
-  // ---------- Focus recovery (kept as a backup; main flow no longer depends on it) ----------
-  useEffect(() => {
-    if (!walletClient || !destAddr) return
-
-    const handler = async () => {
-      if (step !== 'bridging') return
-      try {
-        const user0 = walletClient.account!.address as `0x${string}`
-        const bal = await readWalletBalance('lisk', destAddr, user0).catch(() => 0n)
-
-        if (bal > preBal) {
-          console.info(TAG, '[focus] detected landing, advancing to deposit')
-          setBridgeOk(true)
-          const landed = bal - preBal
-          setCachedMinOut(landed)
-
-          const wc = await ensureLiskWalletClient()
-          setStep('depositing')
-          await depositMorphoOnLiskAfterBridge(snap, landed, wc)
-
-          setStep('success')
-          onSuccess({
-            amount: Number(amount || 0),
-            sourceToken: sourceTokenLabel,
-            destinationAmount: Number(receiveDisplay ?? 0),
-            destinationToken: destTokenLabel,
-            vault: `Re7 ${snap.token} Vault (Morpho Blue)`,
-          })
-          onClose()
-        }
-      } catch (e) {
-        console.error(TAG, '[focus] failed', e)
-      }
-    }
-
-    window.addEventListener('focus', handler)
-    return () => window.removeEventListener('focus', handler)
-  }, [step, walletClient, destAddr, preBal, snap, ensureLiskWalletClient, onClose, onSuccess, amount, receiveDisplay, destTokenLabel])
-
-  // ---------- Deposit-only retry ----------
-  async function depositOnlyRetry() {
-    if (!walletClient || !destAddr) return
-    const wc = await ensureLiskWalletClient()
-
-    const user = wc.account!.address as `0x${string}`
-    let amt = cachedMinOut && cachedMinOut > 0n ? cachedMinOut : (cachedInputAmt ?? 0n)
-
-    const bal = await readWalletBalance('lisk', destAddr, user).catch(() => 0n)
-    if (amt <= 0n || amt > bal) amt = bal
-    if (amt <= 0n) {
-      setError('Nothing to deposit')
-      setStep('error')
-      return
-    }
-
-    try {
-      setError(null)
-      setStep('depositing')
-      await depositMorphoOnLiskAfterBridge(snap, amt, wc)
-
-      setStep('success')
-      onSuccess({
-        amount: Number(amount || 0),
-        sourceToken: sourceTokenLabel,
-        destinationAmount: Number(receiveDisplay ?? 0),
-        destinationToken: destTokenLabel,
-        vault: `Re7 ${snap.token} Vault (Morpho Blue)`,
-      })
-      onClose()
-    } catch (e: any) {
-      setError(e?.message ?? String(e))
-      setStep('error')
-    }
-  }
-
-  async function handleConfirm() {
-    if (!walletClient) {
-      openConnect()
-      return
-    }
-
-    setError(null)
-    setBridgeOk(false)
-
-    // Reset per-run state
-    setApprovalDone(false)
-    setBridgeSubmitted(false)
-    setBridgeDone(false)
-    setBridgeTxHash(null)
-
-    try {
-      const inputAmt = parseUnits(amount || '0', snap.token === 'WETH' ? 18 : 6)
-      const user = walletClient.account!.address as `0x${string}`
-
-      if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
-
-      const _destAddr =
-        destTokenLabel === 'USDCe'
-          ? (TokenAddresses.USDCe.lisk as `0x${string}`)
-          : destTokenLabel === 'USDT0'
-            ? (TokenAddresses.USDT0.lisk as `0x${string}`)
-            : (TokenAddresses.WETH.lisk as `0x${string}`)
-
-      setDestAddr(_destAddr)
-      setCachedInputAmt(inputAmt)
-
-      // ── All deposits now bridge from OP → Lisk ──
-      const srcToken: 'USDC' | 'USDT' | 'USDT0' | 'USDCe' = sourceSymbol
-      const srcChain = 'optimism' as const
-
-      // Baseline Lisk balance for landing detection
-      const pre = (await readWalletBalance('lisk', _destAddr, user).catch(() => 0n)) as bigint
-      setPreBal(pre)
-
-      setStep('bridging')
-
-      // Quote (for minOut display; we still accept any positive landing)
-      const q = await getBridgeQuote({
-        token: destTokenLabel,
-        amount: inputAmt,
-        from: srcChain,
-        to: 'lisk',
-        fromAddress: user,
-        fromTokenSym: srcToken,
-      })
-      setCachedMinOut(BigInt(q.estimate?.toAmountMin ?? '0'))
-
-      // Execute bridge on Optimism only
-      const srcViem = CHAINS.optimism
-      await switchOrAddChain(walletClient, srcViem)
-
-      await bridgeTokens(destTokenLabel, inputAmt, srcChain, 'lisk', walletClient, {
-        sourceToken: srcToken,
-        onUpdate: (u?: any) => {
-          const stage = String(u?.stage ?? '').toLowerCase()
-          const hash = u?.txHash as `0x${string}` | undefined
-
-          if (hash && !bridgeTxHash) setBridgeTxHash(hash)
-
-          // Submitted => show "Bridging…" and mark approval done
-          if (stage === 'submitted' || stage === 'confirming' || stage === 'completed') {
-            setBridgeSubmitted(true)
-            setApprovalDone(true)
-          }
-
-          if (hash) {
-            setBridgeSubmitted(true)
-            setApprovalDone(true)
-          }
-        },
-      })
-
-      // ✅ Route finished (not just signed)
-      setBridgeDone(true)
-
-      // If LI.FI never emitted updates, don’t hang “Approve”
-      setBridgeSubmitted(true)
-      setApprovalDone(true)
-
-      // ✅ Poll immediately for landing (no fixed 60s sleep)
-      const { landed } = await waitForLanding({
-        destAddr: _destAddr,
-        user,
-        preBal: pre,
-        timeoutMs: 15 * 60_000,
-        intervalMs: 6_000,
-      })
-
-      setBridgeOk(true)
-      setCachedMinOut(landed)
-
-      const wc = await ensureLiskWalletClient()
-      if (landed <= 0n) throw new Error('Nothing to deposit on Lisk')
-
-      setStep('depositing')
-
-      await withTimeout(
-        depositMorphoOnLiskAfterBridge(snap, landed, wc),
-        120_000,
-        'Deposit signing/submit timed out',
-      )
-
-      // Optional: switch back to OP Mainnet
-      try {
-        await switchOrAddChain(wc, srcViem)
-      } catch (switchErr) {
-        console.warn(TAG, 'Failed to switch back to OP, ignoring', switchErr)
-      }
-
-      setStep('success')
-      onSuccess({
-        amount: Number(amount || 0),
-        sourceToken: sourceTokenLabel,
-        destinationAmount: Number(receiveDisplay ?? 0),
-        destinationToken: destTokenLabel,
-        vault: `Re7 ${snap.token} Vault (Morpho Blue)`,
-      })
-      onClose()
-    } catch (e: any) {
-      setError(e?.message ?? String(e))
-      setStep('error')
-    }
-  }
-
-  // ---------- UI state mapping ----------
-  const bridgeState: 'idle' | 'working' | 'done' | 'error' =
-    step === 'bridging'
-      ? 'working'
-      : step === 'depositing' || step === 'success' || (step === 'error' && bridgeOk)
-        ? 'done'
-        : step === 'error'
-          ? 'error'
-          : 'idle'
-
-  // ---------- Retry semantics ----------
-  const primaryCta =
-    step === 'error'
-      ? bridgeOk
-        ? 'Retry deposit'
-        : 'Try again'
-      : step === 'idle'
-        ? 'Deposit'
-        : step === 'bridging'
-          ? bridgeSubmitted
-            ? 'Bridging…'
-            : 'Sign bridge transaction…'
-          : step === 'depositing'
-            ? 'Depositing…'
-            : step === 'success'
-              ? 'Done'
-              : 'Working…'
-
-  const onPrimary = () => {
-    if (step === 'error') {
-      if (bridgeOk) {
-        void depositOnlyRetry()
-        return
-      }
-      setError(null)
-      setStep('idle')
-      setApprovalDone(false)
-      setBridgeSubmitted(false)
-      setBridgeDone(false)
-      setBridgeTxHash(null)
-      void handleConfirm()
-      return
-    }
-    if (step === 'success') {
-      onClose()
-      return
-    }
-    if (step === 'idle') {
-      void handleConfirm()
-      return
-    }
-  }
+  const optimismChainId = CHAINS.optimism.id
+  const liskChainId = 1135 // Lisk L2 chain id
 
   // ---------- Source row visuals (always OP source) ----------
   const sourceIcon =
@@ -506,7 +177,317 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
   const sourceTokenLabel = sourceSymbol
   const sourceChainLabel = 'OP Mainnet'
 
-  // ---------- Bridge dots (UI only) ----------
+  /* -------------------------------------------------------------------------- */
+  /* Create + sign deposit intent (OP)                                           */
+  /* -------------------------------------------------------------------------- */
+  const createDepositIntent = useCallback(async () => {
+    if (!walletClient) throw new Error('No wallet client')
+    if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
+
+    const user = walletClient.account!.address as `0x${string}`
+
+    const asset =
+      destTokenLabel === 'USDCe'
+        ? (TokenAddresses.USDCe.lisk as `0x${string}`)
+        : destTokenLabel === 'USDT0'
+          ? (TokenAddresses.USDT0.lisk as `0x${string}`)
+          : (TokenAddresses.WETH.lisk as `0x${string}`)
+
+    const amountIn = parseUnits(amount || '0', sourceDecimals)
+
+    const nowSec = Math.floor(Date.now() / 1000)
+    const deadline = (nowSec + 60 * 30).toString() // 30 minutes
+    const nonce = BigInt(nowSec).toString()
+    const refId = randomBytes32()
+    const salt = randomBytes32()
+
+    const domain = {
+      name: 'SuperYLDR',
+      version: '1',
+      chainId: optimismChainId,
+    }
+
+    const types = {
+      DepositIntent: [
+        { name: 'user', type: 'address' },
+        { name: 'key', type: 'bytes32' },
+        { name: 'asset', type: 'address' },
+        { name: 'amount', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'refId', type: 'bytes32' },
+        { name: 'salt', type: 'bytes32' },
+      ] as const,
+    }
+
+    const message = {
+      user,
+      key: ZERO32,
+      asset,
+      amount: amountIn,
+      deadline: BigInt(deadline),
+      nonce: BigInt(nonce),
+      refId,
+      salt,
+    }
+
+    console.info(TAG, 'signing deposit intent', { message })
+
+    const signature = await walletClient.signTypedData({
+      account: user,
+      domain,
+      types,
+      primaryType: 'DepositIntent',
+      message,
+    })
+
+    // Normalize “OP rep” → underlying source token for relayer, if needed
+    const srcToken: 'USDC' | 'USDT' =
+      sourceSymbol === 'USDT' || sourceSymbol === 'USDT0' ? 'USDT' : 'USDC'
+
+    const res = await fetch('/api/create-intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        intent: {
+          user,
+          adapterKey: ZERO32,
+          asset,
+          amount: amountIn.toString(),
+          deadline,
+          nonce,
+          refId,
+          salt,
+          fromChain: 'optimism',
+          srcToken,
+        },
+        signature,
+      }),
+    })
+
+    const json = await res.json().catch(() => null)
+    if (!res.ok || !json?.ok) {
+      console.error(TAG, 'create-intent failed', json)
+      throw new Error(json?.error || 'Failed to create deposit intent')
+    }
+
+    return { refId: json.refId as `0x${string}` }
+  }, [walletClient, snap.chain, destTokenLabel, amount, sourceSymbol, optimismChainId])
+
+  /* -------------------------------------------------------------------------- */
+  /* Retry deposit only (finish)                                                */
+  /* -------------------------------------------------------------------------- */
+  const depositOnlyRetry = useCallback(async () => {
+    if (!currentRefId) {
+      setError('Missing deposit reference; please try again.')
+      setStep('error')
+      return
+    }
+
+    try {
+      setError(null)
+      setStep('depositing')
+
+      const res = await fetch('/api/relayer/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          refId: currentRefId,
+          fromTxHash: lastFromTxHash ?? undefined,
+          fromChainId: optimismChainId,
+          toChainId: liskChainId,
+        }),
+      })
+
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.ok) {
+        console.error(TAG, 'finish (retry) failed', json)
+        throw new Error(json?.error || 'Failed to finalize deposit')
+      }
+
+      setStep('success')
+      onSuccess({
+        amount: Number(amount || 0),
+        sourceToken: sourceTokenLabel,
+        destinationAmount: Number(receiveDisplay ?? 0),
+        destinationToken: destTokenLabel,
+        vault: `Re7 ${snap.token} Vault (Morpho Blue)`,
+      })
+      onClose()
+    } catch (e: any) {
+      console.error(TAG, 'retry deposit error', e)
+      setError(e?.message ?? String(e))
+      setStep('error')
+    }
+  }, [
+    currentRefId,
+    lastFromTxHash,
+    optimismChainId,
+    liskChainId,
+    onSuccess,
+    onClose,
+    amount,
+    receiveDisplay,
+    destTokenLabel,
+    snap.token,
+    sourceTokenLabel,
+  ])
+
+  /* -------------------------------------------------------------------------- */
+  /* Full confirm flow (Safe-first wagmi)                                        */
+  /* -------------------------------------------------------------------------- */
+  const handleConfirm = useCallback(async () => {
+    // 0) Ensure connected (Safe first)
+    await ensureConnected(isConnected, connectors, connectAsync)
+
+    // After connecting, wagmi may not have hydrated walletClient *this tick*.
+    if (!walletClient) return
+
+    setError(null)
+    setBridgeOk(false)
+
+    // Reset per-run UI state
+    setBridgeSubmitted(false)
+    setBridgeDone(false)
+    setBridgeTxHash(null)
+
+    try {
+      if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
+
+      // 1) Ensure OP (OP-only interactions; no programmatic switching)
+      assertOnOptimism(walletClient)
+
+      const user = walletClient.account!.address as `0x${string}`
+      const inputAmt = parseUnits(amount || '0', sourceDecimals)
+
+      // 2) Create intent (store refId for retry)
+      const { refId } = await createDepositIntent()
+      setCurrentRefId(refId)
+
+      // 3) Fresh quote for minAmount (tolerate by small buffer)
+      setStep('bridging')
+      const quote = await getBridgeQuote({
+        token: destTokenLabel,
+        amount: inputAmt,
+        from: 'optimism',
+        to: 'lisk',
+        fromAddress: user,
+        fromTokenSym: sourceSymbol,
+      })
+
+      const rawMinOut = BigInt(quote.estimate?.toAmountMin ?? '0')
+      const minOut = rawMinOut > 0n ? rawMinOut - 10n : 0n
+      console.info(TAG, 'bridge quote', { minOut: minOut.toString(), quote })
+
+      // 4) Execute bridge OP → Lisk (bridge util should route to relayer on Lisk)
+      const bridgeResult = await bridgeTokens(destTokenLabel, inputAmt, 'optimism', 'lisk', walletClient, {
+        sourceToken: sourceSymbol,
+        onUpdate: (u?: any) => {
+          const stage = String(u?.stage ?? '').toLowerCase()
+          const hash = (u?.txHash as `0x${string}` | undefined) ?? undefined
+
+          if (hash && !bridgeTxHash) setBridgeTxHash(hash)
+
+          // Once the route is submitted, hide the “Approve…” sub-step and show progress
+          if (stage === 'submitted' || stage === 'confirming' || stage === 'completed') {
+            setBridgeSubmitted(true)
+          }
+          if (hash) setBridgeSubmitted(true)
+        },
+      })
+
+      const fromTxHash: `0x${string}` | undefined = bridgeResult?.txHash ?? bridgeTxHash ?? undefined
+      if (!fromTxHash) throw new Error('Bridge executed but no txHash was captured from LiFi route')
+
+      setLastFromTxHash(fromTxHash)
+
+      // route finished (not just signed)
+      setBridgeDone(true)
+      setBridgeSubmitted(true)
+
+      // 5) Attach route info (non-fatal)
+      try {
+        await fetch('/api/relayer/route-progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            refId,
+            fromTxHash,
+            fromChainId: optimismChainId,
+            toChainId: liskChainId,
+          }),
+        })
+      } catch (routeErr) {
+        console.warn(TAG, 'route-progress failed (non-fatal)', routeErr)
+      }
+
+      // 6) Finish (relayer wait+deposit+mint)
+      setBridgeOk(true)
+      setStep('depositing')
+
+      const finishRes = await fetch('/api/relayer/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          refId,
+          fromTxHash,
+          fromChainId: optimismChainId,
+          toChainId: liskChainId,
+          minAmount: minOut.toString(),
+        }),
+      })
+
+      const finishJson = await finishRes.json().catch(() => null)
+      if (!finishRes.ok || !finishJson?.ok) {
+        console.error(TAG, 'finish failed', finishJson)
+        throw new Error(finishJson?.error || 'Failed to finalize deposit')
+      }
+
+      setStep('success')
+      onSuccess({
+        amount: Number(amount || 0),
+        sourceToken: sourceTokenLabel,
+        destinationAmount: Number(receiveDisplay ?? 0),
+        destinationToken: destTokenLabel,
+        vault: `Re7 ${snap.token} Vault (Morpho Blue)`,
+      })
+      onClose()
+    } catch (e: any) {
+      console.error(TAG, 'handleConfirm error', e)
+      setError(e?.message ?? String(e))
+      setStep('error')
+    }
+  }, [
+    isConnected,
+    connectors,
+    connectAsync,
+    walletClient,
+    snap.chain,
+    snap.token,
+    amount,
+    sourceDecimals,
+    destTokenLabel,
+    sourceSymbol,
+    optimismChainId,
+    liskChainId,
+    createDepositIntent,
+    bridgeTxHash,
+    onSuccess,
+    onClose,
+    receiveDisplay,
+    sourceTokenLabel,
+  ])
+
+  // ---------- UI state mapping ----------
+  const bridgeState: 'idle' | 'working' | 'done' | 'error' =
+    step === 'bridging'
+      ? 'working'
+      : step === 'depositing' || step === 'success' || (step === 'error' && bridgeOk)
+        ? 'done'
+        : step === 'error'
+          ? 'error'
+          : 'idle'
+
   const bridgeFailedBeforeLanding = step === 'error' && !bridgeOk
   const depositFailedAfterBridge = step === 'error' && bridgeState === 'done'
 
@@ -522,22 +503,15 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
           : 'idle'
 
   const dot3: DotState =
-    step === 'depositing'
-      ? 'active'
-      : step === 'success'
-        ? 'done'
-        : depositFailedAfterBridge
-          ? 'error'
-          : 'idle'
+    step === 'depositing' ? 'active' : step === 'success' ? 'done' : depositFailedAfterBridge ? 'error' : 'idle'
 
-  // ---------- Step hint ----------
   const stepHint = (() => {
     if (step === 'bridging') {
       return bridgeSubmitted
-        ? 'Bridge submitted. Waiting for funds to arrive on Lisk…'
+        ? 'Bridge submitted. Waiting for relayer to finalize on Lisk…'
         : 'Signature required to start bridging.'
     }
-    if (step === 'depositing') return 'Your funds have arrived on Lisk. Depositing into the vault…'
+    if (step === 'depositing') return 'Finalizing: deposit on Lisk and minting receipt on OP…'
     if (step === 'success') return 'Deposit complete. Your position will refresh shortly.'
     if (step === 'error') return 'Something went wrong. Check the error below and try again.'
     return 'You’re depositing.'
@@ -545,13 +519,64 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
 
   const isWorking = step === 'bridging' || step === 'depositing'
 
+  const primaryCta =
+    !walletClient && !isConnected
+      ? 'Connect wallet'
+      : step === 'error'
+        ? bridgeOk
+          ? 'Retry deposit'
+          : 'Try again'
+        : step === 'idle'
+          ? 'Deposit'
+          : step === 'bridging'
+            ? bridgeSubmitted
+              ? 'Bridging…'
+              : 'Sign bridge transaction…'
+            : step === 'depositing'
+              ? 'Depositing…'
+              : step === 'success'
+                ? 'Done'
+                : 'Working…'
+
+  const onPrimary = () => {
+    if (!walletClient && !isConnected) {
+      void handleConfirm()
+      return
+    }
+
+    if (step === 'error') {
+      if (bridgeOk) {
+        void depositOnlyRetry()
+        return
+      }
+      setError(null)
+      setStep('idle')
+      setBridgeSubmitted(false)
+      setBridgeDone(false)
+      setBridgeTxHash(null)
+      void handleConfirm()
+      return
+    }
+
+    if (step === 'success') {
+      onClose()
+      return
+    }
+
+    if (step === 'idle') {
+      void handleConfirm()
+      return
+    }
+  }
+
   return (
     <div className={`fixed inset-0 z-[100] ${open ? '' : 'pointer-events-none'}`}>
       <div className={`absolute inset-0 bg-black/50 transition-opacity ${open ? 'opacity-100' : 'opacity-0'}`} />
       <div className="absolute inset-0 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
         <div
-          className={`w-full max-w-[400px] my-8 rounded-2xl bg-background border border-border shadow-xl overflow-hidden transform transition-all ${open ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0'
-            }`}
+          className={`w-full max-w-[400px] my-8 rounded-2xl bg-background border border-border shadow-xl overflow-hidden transform transition-all ${
+            open ? 'translate-y-0 opacity-100' : 'translate-y-4 opacity-0'
+          }`}
         >
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <h3 className="text-xl font-semibold flex items-center gap-2">
@@ -562,9 +587,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
             </button>
           </div>
 
-          <div className="px-5 space-y-0">
-            {stepHint && <StepHintRow hint={stepHint} />}
-          </div>
+          <div className="px-5 space-y-0">{stepHint && <StepHintRow hint={stepHint} />}</div>
 
           <div className="px-5 py-5 space-y-0">
             {/* Step 1: Source */}
@@ -573,7 +596,13 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
               <div className="relative mt-0.5 shrink-0">
                 <Image src={sourceIcon} alt={sourceTokenLabel} width={40} height={40} className="rounded-full" />
                 <div className="absolute -bottom-0.5 -right-3 rounded-sm border-2 border-background">
-                  <Image src="/networks/op-icon.png" alt={sourceChainLabel} width={16} height={16} className="rounded-sm" />
+                  <Image
+                    src="/networks/op-icon.png"
+                    alt={sourceChainLabel}
+                    width={16}
+                    height={16}
+                    className="rounded-sm"
+                  />
                 </div>
               </div>
               <div className="flex-1">
@@ -595,7 +624,10 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
                 <div className="flex items-start gap-2">
                   <div className="flex-1">
                     <div className="text-lg font-semibold">Bridging via LI.FI</div>
-                    <div className="text-xs text-muted-foreground">Bridge Fee: {feeDisplay.toFixed(4)} {sourceSymbol}</div>
+                    <div className="text-xs text-muted-foreground">
+                      Bridge Fee: {feeDisplay.toFixed(4)} {sourceSymbol}
+                    </div>
+                    <div className="text-xs text-muted-foreground">{routeLabel}</div>
                   </div>
                 </div>
               </div>
@@ -619,7 +651,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
             )}
 
             {/* Sub-step 1: Approval complete (once bridge submitted) */}
-            {(step !== 'idle' && bridgeSubmitted) && (
+            {step !== 'idle' && bridgeSubmitted && (
               <div className="flex items-start gap-3 pb-5 relative">
                 <div className="absolute left-5 top-10 bottom-0 w-px bg-border" aria-hidden="true" />
                 <div className="relative mt-0.5 shrink-0">
@@ -669,7 +701,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
                             : 'Sign bridge transaction'}
                     </div>
 
-                    {/* ✅ Explorer link ONLY once bridge is complete (not immediately after signature) */}
+                    {/* Explorer link ONLY once bridge is complete */}
                     {bridgeDone && bridgeTxHash && (
                       <a
                         href={opTxUrl(bridgeTxHash)}
@@ -774,11 +806,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
               </div>
             </div>
 
-            {error && (
-              <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3 mt-2">
-                {error}
-              </div>
-            )}
+            {error && <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3 mt-2">{error}</div>}
           </div>
 
           <div className="px-5 pb-5">

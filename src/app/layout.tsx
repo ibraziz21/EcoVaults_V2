@@ -2,7 +2,7 @@
 import '@/app/globals.css'
 import { ReactNode } from 'react'
 import { headers } from 'next/headers'
-import type { Metadata } from 'next'
+import type { Metadata } from 'next'              // ⬅️ NEW
 import ContextProvider from '@/config/appkit'
 import AppShell from '@/components/AppShell'
 import { Toaster } from '@/components/ui/sonner'
@@ -19,22 +19,21 @@ const openSauce = localFont({
   variable: '--font-opensauce',
 })
 
-const baseUrl = 'https://vaults.labs.eco'
-
+// 🔹 Global defaults (can be overridden per page)
 export const metadata: Metadata = {
-  metadataBase: new URL(baseUrl),
+  metadataBase: new URL('https://vaults.labs.eco'),
   title: 'EcoVaults',
   description:
     'Earn, track and manage your EcoVaults positions across supported networks.',
   openGraph: {
     type: 'website',
-    url: `${baseUrl}/`,
+    url: 'https://vaults.labs.eco/',
     title: 'EcoVaults',
     description:
       'Earn, track and manage your EcoVaults positions across supported networks.',
     images: [
       {
-        url: `${baseUrl}/opengraph_dark.jpg`,
+        url: '/opengraph_dark.jpg', // ⬅️ new OG image
         width: 1200,
         height: 630,
         alt: 'EcoVaults',
@@ -46,11 +45,16 @@ export const metadata: Metadata = {
     title: 'EcoVaults',
     description:
       'Earn, track and manage your EcoVaults positions across supported networks.',
-    images: [`${baseUrl}/opengraph_dark.jpg`],
+    images: ['/opengraph_dark.jpg'],
   },
 }
 
-export default async function RootLayout({ children }: { children: ReactNode }) {
+export default async function RootLayout({
+  children,
+}: {
+  children: ReactNode
+}) {
+  // runs on the server; cookies() is async in Next 13.4+
   const cookieHeader = (await headers()).get('cookie')
 
   return (
