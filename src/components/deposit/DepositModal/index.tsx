@@ -25,7 +25,7 @@ import { bridgeAndDepositViaRouterPush } from '@/lib/bridge'
 import { adapterKeyForSnapshot } from '@/lib/adapters'
 import { TokenAddresses } from '@/lib/constants'
 import { publicOptimism, publicLisk } from '@/lib/clients'
-import { useWalletClient, useAccount } from 'wagmi'
+import { useWalletClient, useAccount, useConnect } from 'wagmi'
 import { formatUnits, parseUnits } from 'viem'
 import { erc20Abi } from 'viem'
 import {
