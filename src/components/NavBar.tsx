@@ -18,6 +18,27 @@ import ExitIconSvg from '../../public/exit-icon.svg'
 /* ──────────────────────────────────────────────────────────────── */
 
 const OP_CHAIN_ID = 10
+const CHAIN_META: Record<
+  number,
+  {
+    key: 'optimism'
+    label: string
+    badge: string
+    icon: any
+    bg: string
+    ring: string
+  }
+> = {
+  10: {
+    key: 'optimism',
+    label: 'OP Mainnet',
+    badge: 'OP',
+    icon: '/networks/op-icon.png',
+    bg: 'bg-rose-600',
+    ring: 'ring-rose-500/30',
+  },
+}
+
 
 function shortAddr(a?: string) {
   if (!a) return ''
@@ -46,19 +67,24 @@ function useLikelySafeContext() {
   return embedded
 }
 
-function NetworkBadge() {
+function NetworkBadge({ chainId, size = 'sm' }: { chainId?: number; size?: 'sm' | 'md' }) {
+  if (!chainId || !CHAIN_META[chainId]) return null
+  const m = CHAIN_META[chainId]
+  const iconSize = size === 'sm' ? 20 : 28
+  const containerSize = size === 'sm' ? 'h-5 w-5' : 'h-7 w-7'
+
   return (
     <div
       className="inline-flex items-center justify-center rounded-md border border-gray-200 bg-white p-1"
-      title="OP Mainnet"
+      title={m.label}
     >
-      <span className="relative inline-flex h-5 w-5 items-center justify-center rounded-md overflow-hidden">
+      <span className={`relative inline-flex ${containerSize} items-center justify-center rounded-md overflow-hidden`}>
         <Image
-          src="/networks/op-icon.png"
-          alt="OP Mainnet"
-          width={20}
-          height={20}
-          className="h-5 w-5 rounded-md"
+          src={m.icon}
+          alt={m.label}
+          width={iconSize}
+          height={iconSize}
+          className={`${size === 'sm' ? 'h-5 w-5' : 'h-7 w-7'} rounded`} 
         />
       </span>
     </div>
@@ -177,41 +203,41 @@ export function Navbar() {
   }
 
   return (
-    <div className="mt-[12px]">
-      {/* Top App Bar */}
-      <header className="sticky top-0 z-50 w-full bg-white border-b border-border/60 max-w-6xl mx-auto rounded-xl">
-        <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-3 sm:px-4">
+    <div className='w-full pt-3 px-4'>
+      <div className="mx-auto max-w-[1392px]" >
+       {/* Top App Bar */}
+       <header className={`sticky top-0 z-50 w-full bg-background border-b border-border/60 rounded-xl transition-shadow`}> 
+        <div className="mx-auto flex h-14 w-full items-center justify-between px-2.5"> 
           {/* Brand */}
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
             <Link href="/" className="group inline-flex items-center gap-2 min-w-0">
               <Image
                 src={ecovaults}
-                alt="EcoVaults"
-                width={144}
-                height={36}
+                alt="ecovaults"
+                width={120}
+                height={40}
                 priority
-                className="h-9 w-auto"
+                className="h-10 w-auto sm:w-auto object-contain"
               />
             </Link>
-
             {/* Desktop nav */}
-            <nav className="ml-2 hidden items-center gap-1 md:flex">
+            <nav className="ml-2 hidden items-center gap-1 md:flex flex-1">
               <ActiveLink href="/">Dashboard</ActiveLink>
               <ActiveLink href="/vaults">Vaults</ActiveLink>
             </nav>
           </div>
 
           {/* Right side */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-shrink-0">
             {/* Mobile: hamburger */}
             <button
-              className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-border/60 md:hidden active:scale-95"
+              className=" cursor-pointer inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border/60 md:hidden active:scale-95 transition"
               onClick={() => setMobileOpen((v) => !v)}
               aria-label="Open menu"
               aria-expanded={mobileOpen}
               title="Menu"
             >
-              <svg width="18" height="18" viewBox="0 0 24 24" className="opacity-80">
+              <svg width="20" height="20" viewBox="0 0 24 24" className="opacity-80">
                 <path
                   d="M4 6h16M4 12h16M4 18h16"
                   stroke="currentColor"
@@ -507,6 +533,7 @@ export function Navbar() {
           </div>
         </div>
       </div>
+    </div>
     </div>
   )
 }
