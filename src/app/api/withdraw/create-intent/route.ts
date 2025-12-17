@@ -4,7 +4,14 @@ export const runtime = 'nodejs'
 
 import { NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
-import { verifyTypedData, isAddress, type Address } from 'viem'
+import {
+  verifyTypedData,
+  hashTypedData,
+  isAddress,
+  type Address,
+  createPublicClient,
+  http,
+} from 'viem'
 import { optimism } from 'viem/chains'
 
 function json(x: any, s = 200) {
@@ -16,18 +23,66 @@ function bad(m: string, s = 400) {
 
 const TYPES = {
   WithdrawIntent: [
-    { name: 'user',         type: 'address' },
+    { name: 'user', type: 'address' },
     { name: 'amountShares', type: 'uint256' },
-    { name: 'dstChainId',   type: 'uint256' },
-    { name: 'dstToken',     type: 'address' },
+    { name: 'dstChainId', type: 'uint256' },
+    { name: 'dstToken', type: 'address' },
     { name: 'minAmountOut', type: 'uint256' },
-    { name: 'deadline',     type: 'uint256' },
-    { name: 'nonce',        type: 'uint256' },
-    { name: 'refId',        type: 'bytes32' },
+    { name: 'deadline', type: 'uint256' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'refId', type: 'bytes32' },
   ],
 } as const
 
 const nowSec = () => Math.floor(Date.now() / 1000)
+
+const EIP1271_ABI = [
+  {
+    type: 'function',
+    name: 'isValidSignature',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'hash', type: 'bytes32' },
+      { name: 'signature', type: 'bytes' },
+    ],
+    outputs: [{ name: 'magicValue', type: 'bytes4' }],
+  },
+] as const
+
+const EIP1271_MAGIC_VALUE = '0x1626ba7e' as const
+
+const opRpc =
+  process.env.OP_RPC_URL ||
+  process.env.OPTIMISM_RPC_URL ||
+  'https://mainnet.optimism.io'
+
+const publicClient = createPublicClient({
+  chain: optimism,
+  transport: http(opRpc),
+})
+
+async function isContractAddress(addr: Address): Promise<boolean> {
+  const code = await publicClient.getBytecode({ address: addr }).catch(() => undefined)
+  return !!code && code !== '0x'
+}
+
+async function verifyEip1271Signature(args: {
+  contract: Address
+  digest: `0x${string}`
+  signature: `0x${string}`
+}): Promise<boolean> {
+  const { contract, digest, signature } = args
+  const magic = await publicClient
+    .readContract({
+      address: contract,
+      abi: EIP1271_ABI,
+      functionName: 'isValidSignature',
+      args: [digest, signature],
+    })
+    .catch(() => null)
+
+  return (magic as string | null)?.toLowerCase?.() === EIP1271_MAGIC_VALUE
+}
 
 export async function POST(req: Request) {
   try {
@@ -37,67 +92,57 @@ export async function POST(req: Request) {
 
     if (!signature) return bad('Missing signature')
 
-    const user          = intent.user as Address
-    const amountStr     = intent.amountShares as string
-    const dstChainNum   = Number(intent.dstChainId ?? 0)
-    const dstToken      = intent.dstToken as Address
-    const minOutStr     = intent.minAmountOut as string
-    const deadlineStr   = intent.deadline as string
-    const nonceStr      = intent.nonce as string
-    const refId         = intent.refId as `0x${string}`
-    const signedChainId = Number(intent.signedChainId ?? 0)
+    const user = intent.user as Address
+    const amountStr = intent.amountShares as string
+    const dstChainNum = Number(intent.dstChainId ?? 0)
+    const dstToken = intent.dstToken as Address
+    const minOutStr = intent.minAmountOut as string
+    const deadlineStr = intent.deadline as string
+    const nonceStr = intent.nonce as string
+    const refId = intent.refId as `0x${string}`
+    const signedChainId = Number(intent.signedChainId ?? optimism.id)
 
     if (!isAddress(user)) return bad('Invalid user')
     if (!isAddress(dstToken)) return bad('Invalid dstToken')
-    if (!refId || !refId.startsWith('0x') || refId.length !== 66) {
-      return bad('Invalid refId')
-    }
-    if (!Number.isInteger(dstChainNum) || dstChainNum <= 0) {
-      return bad('Invalid dstChainId')
-    }
-    if (!Number.isInteger(signedChainId) || signedChainId <= 0) {
-      return bad('Missing signedChainId')
-    }
+    if (!refId || !refId.startsWith('0x') || refId.length !== 66) return bad('Invalid refId')
+    if (!Number.isInteger(dstChainNum) || dstChainNum <= 0) return bad('Invalid dstChainId')
+    if (!Number.isInteger(signedChainId) || signedChainId <= 0) return bad('Missing signedChainId')
 
-    // Enforce signing on Optimism for withdraws
+    // Enforce signing on Optimism (OP-only)
     if (signedChainId !== optimism.id) {
       return bad('signedChainId must be Optimism', 400)
     }
 
-    // Basic numeric sanity checks (BigInt will still throw on bad input)
-    if (!amountStr || BigInt(amountStr) <= 0n) {
-      return bad('amountShares must be > 0')
-    }
-    if (!minOutStr || BigInt(minOutStr) <= 0n) {
-      return bad('minAmountOut must be > 0')
-    }
+    // Numeric sanity
+    if (!amountStr || BigInt(amountStr) <= 0n) return bad('amountShares must be > 0')
+    if (!minOutStr || BigInt(minOutStr) <= 0n) return bad('minAmountOut must be > 0')
     if (!deadlineStr) return bad('Missing deadline')
+    if (!nonceStr) return bad('Missing nonce')
 
     const deadline = BigInt(deadlineStr)
-    if (deadline <= BigInt(nowSec())) {
-      return bad('Withdraw intent expired', 401)
-    }
+    if (deadline <= BigInt(nowSec())) return bad('Withdraw intent expired', 401)
 
-    // Rebuild the same domain the wallet used
+    // Domain (must match the wallet)
     const domain = {
       name: 'SuperYLDR',
       version: '1',
       chainId: signedChainId,
     } as const
 
-    // Rebuild message with proper bigints (uint256)
+    // Message (must match the wallet)
     const message = {
       user,
       amountShares: BigInt(amountStr),
-      dstChainId:   BigInt(dstChainNum),
+      dstChainId: BigInt(dstChainNum),
       dstToken,
       minAmountOut: BigInt(minOutStr),
       deadline,
-      nonce:        BigInt(nonceStr),
+      nonce: BigInt(nonceStr),
       refId,
     } as const
 
-    const ok = await verifyTypedData({
+    // 1) Try EOA verification first
+    let ok = await verifyTypedData({
       address: user,
       domain,
       types: TYPES,
@@ -106,22 +151,37 @@ export async function POST(req: Request) {
       signature,
     }).catch(() => false)
 
+    // 2) If EOA check fails, try EIP-1271 (Safe / contract wallet)
+    if (!ok) {
+      const digest = hashTypedData({
+        domain,
+        types: TYPES,
+        primaryType: 'WithdrawIntent',
+        message,
+      })
+
+      const contract = await isContractAddress(user)
+      if (contract) {
+        ok = await verifyEip1271Signature({
+          contract: user,
+          digest,
+          signature,
+        })
+      }
+    }
+
     if (!ok) return bad('Invalid signature', 401)
 
-    // Idempotency / uniqueness on refId and (user, nonce)
+    // Idempotency: refId
     const existingByRef = await prisma.withdrawIntent
       .findUnique({ where: { refId } })
       .catch(() => null)
 
     if (existingByRef) {
-      return json({
-        ok: true,
-        refId,
-        already: true,
-        status: existingByRef.status,
-      })
+      return json({ ok: true, refId, already: true, status: existingByRef.status })
     }
 
+    // Persist
     try {
       await prisma.withdrawIntent.create({
         data: {
@@ -141,12 +201,7 @@ export async function POST(req: Request) {
       const msg = String(e?.message ?? '')
       if (msg.includes('P2002') || msg.includes('Unique constraint')) {
         const existingByUserNonce = await prisma.withdrawIntent
-          .findFirst({
-            where: {
-              user,
-              nonce: nonceStr,
-            },
-          })
+          .findFirst({ where: { user, nonce: nonceStr } })
           .catch(() => null)
 
         if (existingByUserNonce) {
