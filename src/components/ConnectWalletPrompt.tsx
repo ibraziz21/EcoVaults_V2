@@ -11,8 +11,6 @@ function detectSafeAppEnv(): boolean {
   const isIframe = window.parent && window.parent !== window
   const host = window.location.hostname.toLowerCase()
   const isSafeHost = host === 'app.safe.global' || host.endsWith('.safe.global')
-
-  // Safe often includes a "safe" query param when opening an app
   const hasSafeParam = new URLSearchParams(window.location.search).has('safe')
 
   return Boolean(isIframe || isSafeHost || hasSafeParam)
@@ -50,14 +48,12 @@ export function ConnectWalletPrompt() {
     }
 
     // In Safe Apps, do NOT try to "connect" — Safe injects the signer.
-    // The rest of your app should rely on wagmi account/provider availability.
     if (isSafeApp) {
       router.push('/')
       return
     }
 
-    // Outside Safe: pick best available connector.
-    // Prefer Safe connector if present, then injected, then anything else.
+    // Outside Safe: pick best available connector (Safe → Injected → fallback).
     const safeConn =
       connectors.find((c) => c.id === 'safe') ??
       connectors.find((c) => c.name?.toLowerCase().includes('safe'))
@@ -67,8 +63,8 @@ export function ConnectWalletPrompt() {
       connectors.find((c) => c.name?.toLowerCase().includes('injected'))
 
     const fallbackConn = connectors[0]
-
     const connector = safeConn ?? injectedConn ?? fallbackConn
+
     if (!connector) throw new Error('No wallet connectors configured')
 
     await connectAsync({ connector })
@@ -77,8 +73,8 @@ export function ConnectWalletPrompt() {
 
   return (
     <div className="flex justify-center items-center min-h-[calc(100vh-3.5rem)] px-4">
-      <div className="w-full flex ecovaults-background bg-right bg-contain bg-no-repeat">
-        <div className="h-[350px] w-[700px] flex flex-col max-w-6xl lg:ml-[100px] justify-center p-2 lg:p-0 gap-6">
+      <div className="w-full flex ecovaults-background bg-right bg-contain bg-no-repeat max-w-[1392px]">
+        <div className="h-[350px] w-[700px] flex flex-col max-w-[1392px] lg:ml-[100px] justify-center p-2 lg:p-0 gap-6">
           <h2 className="text-3xl md:text-5xl lg:text-6xl font-semibold">
             Your gateway to <br /> smarter on-chain yields
           </h2>
@@ -88,7 +84,7 @@ export function ConnectWalletPrompt() {
           <div>
             <Button
               onClick={() => void onPrimary()}
-              className="flex bg-[#376FFF] p-4 py-6 rounded-xl text-base"
+              className="flex bg-[#376FFF] hover:bg-[#2F5DD1] p-4 rounded-[12px] text-base h-10"
               disabled={isPending}
               title={primaryLabel}
             >
