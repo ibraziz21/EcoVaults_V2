@@ -1,7 +1,7 @@
 // src/app/api/create-intent/route.ts
 'use server'
 import 'server-only'
-
+import { createPublicClient, http, parseAbi } from 'viem'
 import { NextResponse } from 'next/server'
 import { verifyTypedData, hashTypedData } from 'viem'
 import { optimism, lisk as liskChain } from 'viem/chains'
@@ -119,17 +119,69 @@ export async function POST(req: Request) {
     refId: intent.refId,
     salt: intent.salt,
   }
+  const EIP1271_ABI = parseAbi([
+    'function isValidSignature(bytes32 _hash, bytes _signature) view returns (bytes4)',
+  ])
+  const EIP1271_MAGICVALUE = '0x1626ba7e' as const
+  
+  const opPublic = createPublicClient({
+    chain: optimism,
+    transport: http(process.env.OP_RPC_URL || 'https://mainnet.optimism.io'),
+  })
+  
+  async function isContractAddress(addr: `0x${string}`) {
+    const code = await opPublic.getBytecode({ address: addr })
+    return !!code && code !== '0x'
+  }
+  
+  async function verifyEOAor1271(opts: {
+    user: `0x${string}`
+    domain: any
+    types: any
+    primaryType: 'DepositIntent'
+    message: any
+    signature: `0x${string}`
+  }) {
+    const { user, domain, types, primaryType, message, signature } = opts
+  
+    // 1) Try EOA verification first
+    const okEOA = await verifyTypedData({
+      address: user,
+      domain,
+      types,
+      primaryType,
+      message,
+      signature,
+    }).catch(() => false)
+  
+    if (okEOA) return true
+  
+    // 2) If it's a contract (Safe), verify via EIP-1271
+    const isContract = await isContractAddress(user)
+    if (!isContract) return false
+  
+    const digest = hashTypedData({ domain, types, primaryType, message })
+  
+    const res = await opPublic.readContract({
+      address: user,
+      abi: EIP1271_ABI,
+      functionName: 'isValidSignature',
+      args: [digest, signature],
+    }).catch(() => null)
+  
+    return (res as string | null)?.toLowerCase() === EIP1271_MAGICVALUE
+  }
 
-  // 1) Verify ECDSA signature (recover == intent.user)
-  const ok = await verifyTypedData({
-    address: intent.user,
-    domain,
-    types,
-    primaryType: 'DepositIntent',
-    message,
-    signature,
-  }).catch(() => false)
-  if (!ok) return bad('invalid signature', 401)
+ // 1) Verify signature (EOA or Safe EIP-1271)
+const ok = await verifyEOAor1271({
+  user: intent.user,
+  domain,
+  types,
+  primaryType: 'DepositIntent',
+  message,
+  signature,
+})
+if (!ok) return bad('invalid signature', 401)
 
   // 2) Compute EIP-712 digest for replay/idempotency control
   const digest = hashTypedData({

@@ -196,7 +196,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       types,
       primaryType: 'DepositIntent',
       message,
-    } as any)
+    })
 
     const srcToken: 'USDC' | 'USDT' =
       sourceSymbol === 'USDT' || sourceSymbol === 'USDT0' ? 'USDT' : 'USDC'
