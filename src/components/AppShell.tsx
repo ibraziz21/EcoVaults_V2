@@ -10,7 +10,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     <div className='bg-[#F9FAFB]'>
       <DisclaimerBanner />
       <Navbar />
-      <main className="min-h-[calc(100vh-3.5rem)]">{children}</main>
+      <main className="min-h-[calc(100vh-3.5rem)] mt-[24px]">{children}</main>
     </div>
   )
 }

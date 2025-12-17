@@ -74,7 +74,7 @@ export const YieldTable: FC = () => {
   }, [yields, query, sort])
 
   return (
-    <Card className="mx-auto w-full max-w-6xl overflow-hidden rounded-xl md:rounded-2xl">
+    <Card className="mx-auto w-full max-w-[1392px] overflow-hidden rounded-xl md:rounded-2xl">
       {/* Top bar (sticky on mobile) */}
       <div className="sticky top-0 z-30 flex flex-col gap-3 border-b border-border/60 bg-gradient-to-r from-white to-white/60 p-3 backdrop-blur md:static md:flex-row md:items-center md:justify-between md:p-4 dark:from-white/5 dark:to-white/10">
         <div className="flex items-center gap-2 md:gap-3">

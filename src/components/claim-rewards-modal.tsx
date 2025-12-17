@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import Image from "next/image"
 import { CheckCircleIcon } from "@phosphor-icons/react"
 import { useUsdPrices } from "@/hooks/useUSDPrices"
+import StarIcon from "../../public/star-icon-modal.svg"
 
 interface Reward {
   token: string
@@ -136,6 +137,7 @@ export function ClaimRewardsModal({
 
   // SUCCESS STATE
   if (state === "success") {
+    
     return (
       <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div className="bg-background rounded-[20px] w-full max-w-sm mx-4 shadow-lg border border-border overflow-hidden">
@@ -164,65 +166,61 @@ export function ClaimRewardsModal({
                 </span>
               </div>
 
-              {/* Claimed Tokens */}
-              {selectedRewards.map((reward) => (
-                <div key={reward.token} className="flex justify-between items-center py-1.5">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-4 h-4 relative">
-                      <Image
-                        src={reward.icon}
-                        alt={reward.token}
-                        width={16}
-                        height={16}
-                        className="rounded-full"
-                        onError={(e) => {
-                          (e.target as HTMLImageElement).src = "/tokens/default.svg"
-                        }}
-                      />
-                    </div>
-                    <span className="text-sm text-foreground font-normal">{reward.amount}</span>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-sm text-foreground">
-                        {reward.amount.toFixed(2)} {reward.token}
+              {/* Claimed Tokens - Updated to match Individual Rewards styling */}
+              {selectedRewards.map((reward) => {
+                const usd = priceUsdForSymbol(reward.token) * reward.amount
+                return (
+                  <div
+                    key={reward.token}
+                    className="flex items-center justify-between px-4 py-3.5"
+                  >
+                    <div className="flex items-center gap-3 flex-1">
+                      <span className="text-sm font-semibold text-foreground">
+                        {reward.token}
                       </span>
+                      <div className="flex items-center gap-2.5 rounded-full bg-[#F3F4F6] py-1 px-2">
+                        <div className="w-5 h-5 relative">
+                          <Image
+                            src={reward.icon}
+                            alt={reward.token}
+                            width={20}
+                            height={20}
+                            className="rounded-full"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).src =
+                                "/tokens/lisk.png"
+                            }}
+                          />
+                        </div>
+                        <span className="text-sm text-foreground">
+                          {reward.amount.toFixed(2)}
+                        </span>
+                        <span className="text-sm font-semibold text-foreground">
+                          {reward.token}
+                        </span>
+                      </div>
                     </div>
+                    <span className="text-sm text-foreground font-semibold">
+                      ${usd.toFixed(2)}
+                    </span>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
 
             {/* Info Box */}
             <div className="bg-blue-50 dark:bg-blue-950/30 border border-[#7FA6FF] rounded-xl p-4">
-              <div className="flex gap-3">
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 20 20"
-                  fill="none"
-                  xmlns="http://www.w3.org/2000/svg"
-                >
-                  <path
-                    d="M12.3529 2L13.8782 6.12184L18 7.64706L13.8782 9.17228L12.3529 13.2941L10.8277 9.17228L6.70588 7.64706L10.8277 6.12184L12.3529 2Z"
-                    stroke="#376FFF"
-                    strokeWidth="1.5"
-                    strokeLinejoin="round"
-                  />
-                  <path
-                    d="M5.29412 11.4118L6.62647 13.3735L8.58824 14.7059L6.62647 16.0382L5.29412 18L3.96176 16.0382L2 14.7059L3.96176 13.3735L5.29412 11.4118Z"
-                    stroke="#376FFF"
-                    strokeWidth="1.5"
-                    strokeLinejoin="round"
-                  />
-                </svg>
+              <div className="flex flex-col gap-3">
 
-                <div>
-                  <p className="text-sm font-normal text-[#376FFF]">
+                <div className="flex">
+                  <Image src={StarIcon} alt="" />
+                  <p className="text-sm font-medium ml-2 text-[#376FFF]">
                     Earn more with your rewards
                   </p>
-                  <p className="text-xs text-foreground mt-1">
-                    Put your rewards to work in active vaults and keep growing your earnings.
-                  </p>
                 </div>
+                <p className="text-xs text-black mt-1">
+                  Put your rewards to work in active vaults and keep growing your earnings.
+                </p>
               </div>
             </div>
 
@@ -231,7 +229,7 @@ export function ClaimRewardsModal({
               <Button
                 onClick={handleExploreVaults}
                 size="lg"
-                className="w-full rounded-lg text-white bg-[#376FFF] hover:bg-blue-700 text-[13px] font-normal h-12"
+                className="w-full rounded-lg text-white bg-[#376FFF] hover:bg-blue-700 text-[13px] font-normal h-10"
               >
                 Explore vaults
               </Button>
@@ -239,7 +237,7 @@ export function ClaimRewardsModal({
                 onClick={handleBackToDashboard}
                 variant="ghost"
                 size="lg"
-                className="w-full rounded-lg text-[13px] font-medium h-12 hover:bg-muted border border-border"
+                className="w-full rounded-lg text-[13px] font-medium h-10 hover:bg-muted border border-border"
               >
                 Back to dashboard
               </Button>
@@ -259,7 +257,7 @@ export function ClaimRewardsModal({
           <h2 className="text-xl font-semibold">Claim rewards</h2>
           <button
             onClick={onClose}
-            className="rounded-[12px] bg-[#F3F4F6] px-2 text-muted-foreground hover:text-foreground transition-colors text-xl"
+            className="rounded-[12px] cursor-pointer bg-[#F3F4F6] px-2 text-muted-foreground hover:text-foreground transition-colors text-xl"
           >
             ✕
           </button>
@@ -282,11 +280,11 @@ export function ClaimRewardsModal({
                   onChange={handleSelectAll}
                   className="w-4 h-4 rounded accent-blue-600 cursor-pointer"
                 />
-                <span className="text-sm font-semibold text-foreground">
+                <span className="text-sm font-normal text-foreground">
                   Select all
                 </span>
               </label>
-              <span className="text-sm text-foreground font-semibold">
+              <span className="text-sm text-foreground font-normal">
                 $
                 {rewards
                   .reduce(
@@ -321,7 +319,7 @@ export function ClaimRewardsModal({
                     <span className="text-sm font-semibold text-foreground">
                       {reward.token}
                     </span>
-                    <div className="flex items-center gap-2.5 rounded-full bg-[#F3F4F6] px-2">
+                    <div className="flex items-center gap-2.5 rounded-full bg-[#F3F4F6] py-1 px-2">
                       <div className="w-5 h-5 relative">
                         <Image
                           src={reward.icon}
@@ -331,7 +329,7 @@ export function ClaimRewardsModal({
                           className="rounded-full"
                           onError={(e) => {
                             (e.target as HTMLImageElement).src =
-                              "/tokens/default.svg"
+                              "/tokens/lisk.png"
                           }}
                         />
                       </div>
@@ -373,7 +371,7 @@ export function ClaimRewardsModal({
               state === "signing"
             }
             size="lg"
-            className="w-full rounded-[12px] text-white bg-[#376FFF] hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed text-[13px] font-medium h-12 flex items-center justify-center gap-2"
+            className="w-full rounded-[12px] text-white bg-[#376FFF] hover:bg-blue-700 disabled:bg-blue-400 disabled:cursor-not-allowed text-[13px] font-medium h-10 flex items-center justify-center gap-2"
           >
             {state === "signing" && (
               <>

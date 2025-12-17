@@ -31,7 +31,7 @@ export function ProtocolTabs() {
   }, [positions, rewardsCount])
 
   return (
-    <div className="mx-auto w-full max-w-6xl">
+    <div className="mx-auto w-full max-w-[1392px]">
       {/* Heading */}
       <div className="mb-4 rounded-2xl border border-border/60 bg-gradient-to-r from-white to-white/60 p-4 backdrop-blur dark:from-white/5 dark:to-white/10">
         <h2 className="text-lg font-semibold">Your Positions</h2>

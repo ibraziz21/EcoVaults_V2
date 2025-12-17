@@ -26,7 +26,7 @@ export const RouteFeesCard: FC<{
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm font-medium">
           <ShieldCheck className="h-4 w-4" />
-          Route & Fees
+          Routing via LI.FI bridge
         </div>
         {route && route !== 'On-chain' ? (
           <span className="inline-flex items-center gap-2 text-xs text-gray-500">

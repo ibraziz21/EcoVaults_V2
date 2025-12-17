@@ -22,23 +22,14 @@ import {
   TokenAddresses,
   SAFEVAULT,
   REWARDS_VAULT,
-  MORPHO_POOLS,
-  ADAPTER_KEYS,
 } from '@/lib/constants'
 import { randomUUID } from 'node:crypto'
-import {
-  registryMarkBridged,
-  registryMarkDeposited,
-  registryMarkMinted,
-  registryMarkFailed,
-} from '@/lib/intentRegistry'
 
 // ---------- config / env ----------
 const LIFI_STATUS_URL = 'https://li.quest/v1/status'
 const LISK_ID = lisk.id
-const MIN_CONFIRMATIONS = 3 // Lisk confirmations for reorg safety
-const LEASE_MS = 60_000 // single-flight lease time
-const ZERO32 = (`0x${'0'.repeat(64)}`) as `0x${string}`
+const MIN_CONFIRMATIONS = 3            // Lisk confirmations for reorg safety
+const LEASE_MS = 60_000                // single-flight lease time
 
 const RELAYER_PRIVATE_KEY_RAW = (process.env.RELAYER_PRIVATE_KEY || '')
   .trim()
@@ -49,76 +40,24 @@ if (!RELAYER_PRIVATE_KEY_RAW) {
 const RELAYER_PRIVATE_KEY = (`0x${RELAYER_PRIVATE_KEY_RAW.replace(/^0x/i, '')}`) as `0x${string}`
 const relayer = privateKeyToAccount(RELAYER_PRIVATE_KEY)
 
-/* ────────────────────────────────────────────────────────────
-   Classification helpers: choose asset kind, Morpho pool and
-   OP rewards vault (USDC vs USDT)
-   ──────────────────────────────────────────────────────────── */
+// Lisk (USDT0, Morpho), OP (mint)
+const USDT0_LISK = TokenAddresses.USDT0.lisk as `0x${string}`
+const MORPHO_POOL = '0x50cb55be8cf05480a844642cb979820c847782ae' as `0x${string}`
+const OP_REWARDS_VAULT = (REWARDS_VAULT.optimismUSDT ??
+  '0x1aDBe89F2887a79C64725128fd1D53b10FD6b441') as `0x${string}`
 
-type AssetKind = 'USDC' | 'USDT'
-
-function classifyIntentForVault(intent: { asset?: string | null; adapterKey?: string | null }) {
-  const assetLc = (intent.asset ?? '').toLowerCase()
-  const usdcLisk = TokenAddresses.USDCe.lisk.toLowerCase()
-  const usdt0Lisk = TokenAddresses.USDT0.lisk.toLowerCase()
-
-  // Primary source of truth: asset field (destination asset on Lisk)
-  if (assetLc === usdcLisk) {
-    return {
-      kind: 'USDC' as AssetKind,
-      liskToken: TokenAddresses.USDCe.lisk as `0x${string}`,
-      morphoPool: MORPHO_POOLS['usdce-supply'] as `0x${string}`,
-      opRewardsVault: REWARDS_VAULT.optimismUSDC as `0x${string}`,
-    }
-  }
-  if (assetLc === usdt0Lisk) {
-    return {
-      kind: 'USDT' as AssetKind,
-      liskToken: TokenAddresses.USDT0.lisk as `0x${string}`,
-      morphoPool: MORPHO_POOLS['usdt0-supply'] as `0x${string}`,
-      opRewardsVault: REWARDS_VAULT.optimismUSDT as `0x${string}`,
-    }
-  }
-
-  // Fallback: adapterKey (handles cases where asset is not yet wired)
-  const keyLc = (intent.adapterKey ?? '').toLowerCase()
-  if (keyLc && keyLc === (ADAPTER_KEYS.morphoLiskUSDCe as string).toLowerCase()) {
-    return {
-      kind: 'USDC' as AssetKind,
-      liskToken: TokenAddresses.USDCe.lisk as `0x${string}`,
-      morphoPool: MORPHO_POOLS['usdce-supply'] as `0x${string}`,
-      opRewardsVault: REWARDS_VAULT.optimismUSDC as `0x${string}`,
-    }
-  }
-  if (keyLc && keyLc === (ADAPTER_KEYS.morphoLiskUSDT0 as string).toLowerCase()) {
-    return {
-      kind: 'USDT' as AssetKind,
-      liskToken: TokenAddresses.USDT0.lisk as `0x${string}`,
-      morphoPool: MORPHO_POOLS['usdt0-supply'] as `0x${string}`,
-      opRewardsVault: REWARDS_VAULT.optimismUSDT as `0x${string}`,
-    }
-  }
-
-  throw new Error(
-    `Unsupported asset/adapter for rewards vault: asset=${intent.asset}, adapterKey=${intent.adapterKey}`,
-  )
-}
-
-function json(x: any, s = 200) {
-  return NextResponse.json(x, { status: s })
-}
-function bad(m: string, s = 400) {
-  return json({ ok: false, error: m }, s)
-}
+function json(x: any, s = 200) { return NextResponse.json(x, { status: s }) }
+function bad(m: string, s = 400) { return json({ ok: false, error: m }, s) }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const leaseUntil = (ms = LEASE_MS) => new Date(Date.now() + ms)
 
 /* ────────────────────────────────────────────────────────────
-   State ranking (must match your canonical DepositState machine)
+   Status ordering & idempotent advance wrapper
    ──────────────────────────────────────────────────────────── */
-const STATE_ORDER: DepositState[] = [
+const ORDER = [
   'PENDING',
-  'PROCESSING',
   'WAITING_ROUTE',
+  'BRIDGING',
   'BRIDGE_IN_FLIGHT',
   'BRIDGED',
   'DEPOSITING',
@@ -126,17 +65,11 @@ const STATE_ORDER: DepositState[] = [
   'MINTING',
   'MINTED',
   'FAILED',
-]
-const stateRank = (s?: string) => {
-  const i = STATE_ORDER.indexOf((s || '').toUpperCase() as DepositState)
-  return i === -1 ? -1 : i
-}
-const isAheadOrEqual = (curr?: string, want?: DepositState) =>
-  stateRank(curr) >= stateRank(want)
+] as const
+type Status = typeof ORDER[number]
+const rank = (s?: string) => Math.max(0, ORDER.indexOf((s || '').toUpperCase() as Status))
+const aheadOrEqual = (curr?: string, want?: string) => rank(curr) >= rank(want)
 
-/* ────────────────────────────────────────────────────────────
-   Idempotent advance wrapper
-   ──────────────────────────────────────────────────────────── */
 async function advanceIdempotent(
   refId: string,
   from: DepositState,
@@ -145,14 +78,12 @@ async function advanceIdempotent(
 ) {
   const row = await prisma.depositIntent.findUnique({ where: { refId } })
   if (!row) throw new Error('intent not found')
-
-  if (row.status === to || isAheadOrEqual(row.status, to)) {
+  if (row.status === to || aheadOrEqual(row.status, to)) {
     if (data && Object.keys(data).length) {
       await prisma.depositIntent.update({ where: { refId }, data }).catch(() => {})
     }
     return
   }
-
   if (row.status !== from) return
   await advanceDeposit(refId, from, to, data)
 }
@@ -172,11 +103,7 @@ async function getLifiStatusByTx(params: {
     txHash: params.fromTxHash,
   })
   if (params.bridge) q.set('bridge', params.bridge)
-
-  const res = await fetch(`${LIFI_STATUS_URL}?${q.toString()}`, {
-    method: 'GET',
-    headers: { accept: 'application/json' },
-  })
+  const res = await fetch(`${LIFI_STATUS_URL}?${q.toString()}`, { method: 'GET', headers: { accept: 'application/json' } })
   if (!res.ok) throw new Error(`LiFi status HTTP ${res.status}`)
   return res.json()
 }
@@ -188,32 +115,20 @@ async function waitForLiFiDone(args: {
   timeoutMs?: number
   pollMs?: number
   keepAlive?: () => Promise<void> | void
-  keepAliveEvery?: number
+  keepAliveEvery?: number  // in polls
 }) {
-  const {
-    fromChainId,
-    toChainId,
-    fromTxHash,
-    timeoutMs = 12 * 60_000,
-    pollMs = 6_000,
-    keepAlive,
-    keepAliveEvery = 5,
-  } = args
-
+  const { fromChainId, toChainId, fromTxHash, timeoutMs = 12 * 60_000, pollMs = 6_000, keepAlive, keepAliveEvery = 5 } = args
   const endAt = Date.now() + timeoutMs
   let polls = 0
-
   while (true) {
     const st = await getLifiStatusByTx({ fromChainId, toChainId, fromTxHash })
     const status = st?.status as string | undefined
-
     if (status === 'DONE') {
       const recv = st?.receiving
       const amountStr = recv?.amount as string | undefined
       const bridgedAmount = amountStr ? BigInt(amountStr) : 0n
       return { st, bridgedAmount, receiving: recv }
     }
-
     if (status === 'FAILED') throw new Error(`LiFi status FAILED for ${fromTxHash}`)
     if (Date.now() > endAt) throw new Error(`Timeout waiting LiFi status for ${fromTxHash}`)
 
@@ -221,7 +136,6 @@ async function waitForLiFiDone(args: {
     if (keepAlive && polls % keepAliveEvery === 0) {
       await keepAlive()
     }
-
     await sleep(pollMs)
   }
 }
@@ -245,19 +159,19 @@ function makeOpClients() {
 }
 
 /* ────────────────────────────────────────────────────────────
-   Mint on Optimism (USDC vs USDT based on intent)
+   Mint on Optimism (idempotent at caller level)
    ──────────────────────────────────────────────────────────── */
-async function mintReceipt(user: `0x${string}`, amount: bigint, rewardsVault: `0x${string}`) {
+async function mintReceipt(user: `0x${string}`, amount: bigint) {
   const { pub, wlt, account } = makeOpClients()
   const { request } = await pub.simulateContract({
-    address: rewardsVault,
+    address: OP_REWARDS_VAULT,
     abi: rewardsAbi,
     functionName: 'recordDeposit',
     args: [user, amount],
     account,
   })
   const mintTx = await wlt.writeContract(request)
-  await pub.waitForTransactionReceipt({ hash: mintTx, confirmations: 3 })
+  await pub.waitForTransactionReceipt({ hash: mintTx , confirmations: 3 })
   return { mintTx }
 }
 
@@ -267,28 +181,19 @@ async function mintReceipt(user: `0x${string}`, amount: bigint, rewardsVault: `0
 async function tryLockIntent(refId: string) {
   const owner = randomUUID()
 
-  const allowed = [
-    'PENDING',
-    'WAITING_ROUTE',
-    'BRIDGE_IN_FLIGHT',
-    'BRIDGED',
-    'DEPOSITING',
-    'DEPOSITED',
-    'MINTING',
-    'FAILED',
-    'PROCESSING',
-  ] as const
-
+  // try acquire fresh lease
   const acquired = await prisma.depositIntent.updateMany({
     where: {
       refId,
-      status: { in: allowed as any },
       OR: [
-        // fresh or unlocked
-        { processingLeaseUntil: null },
-        { processingLeaseUntil: { lt: new Date() } },
-        // or already owned by nobody (safe to take)
-        { processingOwner: null },
+        { status: { in: ['PENDING', 'WAITING_ROUTE', 'BRIDGING', 'BRIDGE_IN_FLIGHT', 'BRIDGED', 'FAILED'] } },
+        {
+          status: { in: ['PROCESSING', 'DEPOSITING', 'MINTING'] },
+          OR: [
+            { processingLeaseUntil: null },
+            { processingLeaseUntil: { lt: new Date() } }, // stale
+          ],
+        },
       ],
     },
     data: {
@@ -304,17 +209,15 @@ async function tryLockIntent(refId: string) {
 
   const row = await prisma.depositIntent.findUnique({ where: { refId } })
   if (!row) return { ok: false, reason: 'Unknown refId' }
-  if (row.status === 'MINTED') return { ok: false, reason: 'Already done' }
-
+  if (row.status === 'MINTED' || row.status === 'SUCCESS') return { ok: false, reason: 'Already done' }
   return { ok: false, reason: 'Already processing', status: row.status, updatedAt: row.updatedAt }
 }
 
 async function ensureOwner(refId: string, owner: string) {
   const row = await prisma.depositIntent.findUnique({ where: { refId } })
   if (!row) throw new Error('Unknown refId')
-  if (row.processingOwner !== owner && row.status !== 'MINTED') {
+  if (row.processingOwner !== owner && row.status !== 'MINTED')
     throw new Error('Lost lease to another finisher')
-  }
 }
 
 async function renewLease(refId: string, owner: string) {
@@ -344,14 +247,6 @@ export async function POST(req: Request) {
     const toChainId = (body?.toChainId as number | undefined) ?? LISK_ID
     const minAmountStr = body?.minAmount as string | undefined
 
-    // Enforce OP -> Lisk only (this build)
-    if (fromChainId != null && fromChainId !== optimism.id) {
-      return bad(`fromChainId must be Optimism (${optimism.id})`, 422)
-    }
-    if (toChainId != null && toChainId !== LISK_ID) {
-      return bad(`toChainId must be Lisk (${LISK_ID})`, 422)
-    }
-
     // lock row (single-flight)
     const lock = await tryLockIntent(refId)
     if (!lock.ok) {
@@ -363,11 +258,7 @@ export async function POST(req: Request) {
     let intent = await prisma.depositIntent.findUnique({ where: { refId } })
     if (!intent) return bad('Unknown refId', 404)
 
-    // Figure out what this intent *actually* targets (USDC vs USDT)
-    const classification = classifyIntentForVault(intent)
-    const { liskToken, morphoPool, opRewardsVault } = classification
-
-    // short-circuit if already MINTED
+    // ✅ short-circuit if already MINTED
     if (intent.status === 'MINTED' && intent.mintTxHash) {
       return json({ ok: true, already: true, status: 'MINTED', mintTxHash: intent.mintTxHash })
     }
@@ -375,10 +266,15 @@ export async function POST(req: Request) {
     // Merge new facts (fromTxHash/chain ids/minAmount)
     const patch: any = {}
     if (fromTxHash && intent.fromTxHash !== fromTxHash) patch.fromTxHash = fromTxHash
+    if (fromChainId && intent.fromChainId !== fromChainId) patch.fromChainId = fromChainId
+    if (toChainId && intent.toChainId !== toChainId) patch.toChainId = toChainId
     if (minAmountStr) {
+      // only relax or set once; never raise the bar later
       const incoming = BigInt(minAmountStr)
-      const current = intent.minAmount ? BigInt(intent.minAmount) : null
-      if (current === null || incoming < current) patch.minAmount = incoming.toString()
+      const current  = intent.minAmount ? BigInt(intent.minAmount) : null
+      if (current === null || incoming < current) {
+        patch.minAmount = incoming.toString()
+      }
     }
     if (Object.keys(patch).length) {
       intent = await prisma.depositIntent.update({ where: { refId }, data: patch })
@@ -387,7 +283,6 @@ export async function POST(req: Request) {
     // If still no source tx, move to WAITING_ROUTE and exit
     if (!intent.fromTxHash) {
       await advanceIdempotent(refId, 'PENDING', 'WAITING_ROUTE')
-      await advanceIdempotent(refId, 'PROCESSING', 'WAITING_ROUTE')
       return json({ ok: true, waiting: true }, 202)
     }
 
@@ -395,8 +290,10 @@ export async function POST(req: Request) {
     await advanceIdempotent(refId, 'WAITING_ROUTE', 'BRIDGE_IN_FLIGHT')
     await advanceIdempotent(refId, 'PROCESSING', 'BRIDGE_IN_FLIGHT')
 
-    const srcChain = optimism.id
-    const dstChain = LISK_ID
+    const srcChain = intent.fromChainId ?? fromChainId
+    const dstChain = intent.toChainId ?? toChainId
+    if (!srcChain) return bad('fromChainId required')
+    if (!dstChain) return bad('toChainId required')
 
     // 1) Wait Li.Fi (renew the lease periodically)
     console.log('[finish] waiting Li.Fi by tx…')
@@ -408,62 +305,41 @@ export async function POST(req: Request) {
       keepAliveEvery: 5,
     })
 
+    const toTxHash = (receiving?.txHash as `0x${string}` | undefined) ?? intent.toTxHash ?? undefined
     if (!receiving) throw new Error('LiFi DONE but missing receiving payload')
 
-    const toTxHash = (receiving?.txHash as `0x${string}` | undefined) ?? intent.toTxHash ?? undefined
-    const recvAddr = receiving.token?.address as `0x${string}` | undefined
-    const expectedToken = liskToken
-
-    if (!recvAddr) throw new Error('LiFi DONE but receiving.token.address is empty')
-
-    if (recvAddr.toLowerCase() !== expectedToken.toLowerCase()) {
-      throw new Error(`Unexpected dest token ${recvAddr}, expected ${expectedToken}`)
-    }
-
-    if (intent.toTokenAddress && intent.toTokenAddress.toLowerCase() !== expectedToken.toLowerCase()) {
-      throw new Error(
-        `Intent toTokenAddress ${intent.toTokenAddress} mismatches classified Lisk asset ${expectedToken}`,
-      )
-    }
+      const recvAddr = receiving.token?.address as `0x${string}` | undefined
+      const expected = (intent.toTokenAddress as `0x${string}` | undefined) ?? USDT0_LISK
+      
+      if (!recvAddr) {
+        throw new Error('LiFi DONE but receiving.token.address is empty')
+      }
+      if (recvAddr.toLowerCase() !== expected.toLowerCase()) {
+        throw new Error(`Unexpected dest token ${recvAddr}, expected ${expected}`)
+      }
 
     // Reorg safety on destination chain
     if (toTxHash) {
       const { pub: liskPub } = makeLiskClients()
-      await liskPub.waitForTransactionReceipt({
-        hash: toTxHash as `0x${string}`,
-        confirmations: MIN_CONFIRMATIONS,
-      })
+      await liskPub.waitForTransactionReceipt({ hash: toTxHash as `0x${string}`, confirmations: MIN_CONFIRMATIONS })
     }
 
-    // Respect minAmount
+    // Respect minAmount (from DB or request)
     const minAmount =
-      intent.minAmount && intent.minAmount.length > 0
+      (intent.minAmount && intent.minAmount.length > 0)
         ? BigInt(intent.minAmount)
-        : typeof minAmountStr === 'string'
-          ? BigInt(minAmountStr)
-          : 0n
+        : (typeof minAmountStr === 'string' ? BigInt(minAmountStr) : 0n)
 
     if (minAmount > 0n && bridgedAmount < minAmount) {
       throw new Error(`Bridged amount ${bridgedAmount} < minAmount ${minAmount}`)
     }
+    const toTokenAddr = recvAddr
 
     await advanceIdempotent(refId, 'BRIDGE_IN_FLIGHT', 'BRIDGED', {
       toTxHash: toTxHash ?? null,
-      toTokenAddress: recvAddr ?? null,
+      toTokenAddress: toTokenAddr ?? null,
       bridgedAmount: bridgedAmount.toString(),
     })
-
-    // Mirror bridge info onchain (best-effort)
-    try {
-      await registryMarkBridged({
-        refId: refId as `0x${string}`,
-        bridgedAmount,
-        // IMPORTANT: bytes32-safe fallback (avoid passing 0x)
-        toTxHash: (toTxHash ?? ZERO32) as `0x${string}`,
-      })
-    } catch (e: any) {
-      console.warn('[finish] registryMarkBridged failed (non-fatal):', e?.message || e)
-    }
 
     const amt = bridgedAmount
     if (amt <= 0n) throw new Error('Zero bridged amount')
@@ -481,48 +357,38 @@ export async function POST(req: Request) {
         pub: liskPub as PublicClient,
         account: relayer,
         chain: lisk,
-        token: liskToken,
-        vaultAddr: morphoPool,
+        token: USDT0_LISK,
+        vaultAddr: MORPHO_POOL,
         receiver: SAFEVAULT,
         amount: amt,
         morphoAbi,
         log: console.log,
       })
 
-      if (verified.sender.toLowerCase() !== relayer.address.toLowerCase()) {
+      if (verified.sender.toLowerCase()  !== relayer.address.toLowerCase()) {
         throw new Error('Deposit sender mismatch (expected relayer EOA)')
       }
-      if (verified.vault.toLowerCase() !== morphoPool.toLowerCase()) {
+      if (verified.vault.toLowerCase()   !== MORPHO_POOL.toLowerCase()) {
         throw new Error('Deposit vault mismatch')
       }
-      if (verified.receiver.toLowerCase() !== SAFEVAULT.toLowerCase()) {
+      if (verified.receiver.toLowerCase()!== SAFEVAULT.toLowerCase()) {
         throw new Error('Deposit receiver mismatch (must be SAFE)')
       }
-      if (verified.token.toLowerCase() !== liskToken.toLowerCase()) {
-        throw new Error('Deposit token mismatch (must match Lisk asset)')
+      if (verified.token.toLowerCase()   !== USDT0_LISK.toLowerCase()) {
+        throw new Error('Deposit token mismatch (must be USDT0)')
       }
       if (verified.amount !== amt) {
         throw new Error(`Deposit amount mismatch: ${verified.amount} != ${amt}`)
       }
-
+      
       await advanceIdempotent(refId, 'DEPOSITING', 'DEPOSITED', {
         depositTxHash: depositTx,
       })
-
-      // Mirror deposit onchain (best-effort)
-      try {
-        await registryMarkDeposited({
-          refId: refId as `0x${string}`,
-          depositTxHash: depositTx as `0x${string}`,
-        })
-      } catch (e: any) {
-        console.warn('[finish] registryMarkDeposited failed (non-fatal):', e?.message || e)
-      }
     } else {
       console.log('[finish] deposit already done; skipping')
     }
 
-    // 3) Mint on OP — idempotent
+    // 3) Mint on OP — idempotent transition using updateMany
     intent = await prisma.depositIntent.findUnique({ where: { refId } })
     if (intent?.status === 'MINTED' && intent.mintTxHash) {
       return json({ ok: true, refId, status: 'MINTED', mintTxHash: intent.mintTxHash })
@@ -540,46 +406,24 @@ export async function POST(req: Request) {
         data: { status: 'MINTING', updatedAt: new Date() },
       })
 
-      const { mintTx } = await mintReceipt(intent.user as `0x${string}`, amt, opRewardsVault)
+      const { mintTx } = await mintReceipt(intent.user as `0x${string}`, amt)
 
       // Atomically mark MINTED from either DEPOSITED or MINTING
       const upd = await prisma.depositIntent.updateMany({
         where: { refId, status: { in: ['DEPOSITED', 'MINTING'] } },
-        data: {
-          status: 'MINTED',
-          mintTxHash: mintTx,
-          consumedAt: new Date(),
-          updatedAt: new Date(),
-        },
+        data: { status: 'MINTED', mintTxHash: mintTx,consumedAt: new Date(), updatedAt: new Date() },
       })
 
       if (upd.count === 0) {
+        // If someone else already marked MINTED, ensure we won't re-mint next call
         const finalRow = await prisma.depositIntent.findUnique({ where: { refId } })
         if (finalRow?.status !== 'MINTED') {
-          await prisma.depositIntent
-            .update({
-              where: { refId },
-              data: {
-                status: 'MINTED',
-                mintTxHash: mintTx,
-                consumedAt: new Date(),
-                updatedAt: new Date(),
-              },
-            })
-            .catch(() => {})
+          await prisma.depositIntent.update({
+            where: { refId },
+            data: { status: 'MINTED', mintTxHash: mintTx, consumedAt: new Date(), updatedAt: new Date() },
+          }).catch(() => {})
         }
       }
-
-      // Mirror mint onchain (best-effort)
-      try {
-        await registryMarkMinted({
-          refId: refId as `0x${string}`,
-          mintTxHash: mintTx as `0x${string}`,
-        })
-      } catch (e: any) {
-        console.warn('[finish] registryMarkMinted failed (non-fatal):', e?.message || e)
-      }
-
       mintedOk = true
     }
 
@@ -587,6 +431,7 @@ export async function POST(req: Request) {
   } catch (e: any) {
     console.error('[finish] failed:', e?.message || e)
 
+    // Don’t regress to FAILED if mint already succeeded
     try {
       if (refIdForCatch && !mintedOk) {
         const current = await prisma.depositIntent.findUnique({ where: { refId: refIdForCatch } })
@@ -595,20 +440,9 @@ export async function POST(req: Request) {
             where: { refId: refIdForCatch },
             data: { status: 'FAILED', error: e?.message || String(e) },
           })
-
-          // Mirror failure onchain (best-effort)
-          try {
-            await registryMarkFailed({
-              refId: refIdForCatch as `0x${string}`,
-              reason: e?.message || 'finish failed',
-            })
-          } catch (regErr: any) {
-            console.warn('[finish] registryMarkFailed failed (non-fatal):', regErr?.message || regErr)
-          }
         }
       }
     } catch {}
-
     return NextResponse.json({ ok: false, error: e?.message || 'finish failed' }, { status: 500 })
   }
 }

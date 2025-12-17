@@ -6,7 +6,6 @@
  * - Removes all Aave/Compound logic
  * - Bridges + deposits to Morpho Blue vaults on Lisk
  * - Shows simple route/fee info for USDCe via quoteUsdceOnLisk()
- * - Source chain: Optimism only (no Base)
  */
 
 import { FC, useEffect, useMemo, useRef, useState } from 'react'
@@ -25,9 +24,10 @@ import { ensureLiquidity } from '@/lib/smartbridge'
 import { bridgeAndDepositViaRouterPush } from '@/lib/bridge'
 import { adapterKeyForSnapshot } from '@/lib/adapters'
 import { TokenAddresses } from '@/lib/constants'
-import { publicOptimism, publicLisk } from '@/lib/clients'
+import { publicOptimism, publicBase, publicLisk } from '@/lib/clients'
 
-import { useWalletClient,useAccount, useConnect } from 'wagmi'
+import { useAppKit } from '@reown/appkit/react'
+import { useWalletClient } from 'wagmi'
 import { formatUnits, parseUnits } from 'viem'
 import { erc20Abi } from 'viem'
 import {
@@ -43,10 +43,11 @@ import {
    Types / Helpers
    ============================================================================= */
 
-type EvmChain = 'optimism' | 'lisk'
+type EvmChain = 'optimism' | 'base' | 'lisk'
 
 function clientFor(chain: EvmChain) {
   if (chain === 'optimism') return publicOptimism
+  if (chain === 'base') return publicBase
   return publicLisk
 }
 
@@ -96,7 +97,6 @@ function symbolForWalletDisplay(
     if (symbol === 'USDT') return 'USDT0'
     return symbol // already USDCe/USDT0/WETH
   } else {
-    // optimism
     if (symbol === 'USDCe') return 'USDC'
     if (symbol === 'USDT0') return 'USDT'
     return symbol
@@ -139,24 +139,14 @@ interface DepositModalProps {
 type FlowStep = 'idle' | 'bridging' | 'waitingFunds' | 'depositing' | 'success' | 'error'
 
 export const DepositModal: FC<DepositModalProps> = ({ open, onClose, snap }) => {
-  
-const { connect, connectors } = useConnect()
-
-function openConnect() {
-  // Prefer Safe when in Safe, otherwise injected, otherwise first available
-  const safeConn = connectors.find((c) => c.id === 'safe')
-  const injectedConn = connectors.find((c) => c.id === 'injected')
-  const connector = safeConn ?? injectedConn ?? connectors[0]
-
-  if (!connector) throw new Error('No wallet connectors available')
-  connect({ connector })
-}
+  const { open: openConnect } = useAppKit()
   const { data: walletClient } = useWalletClient()
 
   const [amount, setAmount] = useState('')
 
   // Wallet balances
   const [opBal, setOpBal] = useState<bigint | null>(null)
+  const [baBal, setBaBal] = useState<bigint | null>(null)
   const [liBal, setLiBal] = useState<bigint | null>(null)
   const [liBalUSDT, setLiBalUSDT] = useState<bigint | null>(null)
   const [liBalUSDT0, setLiBalUSDT0] = useState<bigint | null>(null)
@@ -183,12 +173,13 @@ function openConnect() {
 
   const tokenDecimals = useMemo(() => (snap.token === 'WETH' ? 18 : 6), [snap.token])
 
-  /* ---------------- Wallet balances (OP/Lisk) ---------------- */
+  /* ---------------- Wallet balances (OP/Base/Lisk) ---------------- */
   useEffect(() => {
     if (!open || !walletClient) return
     const user = walletClient.account.address as `0x${string}`
 
     const opSym = symbolForWalletDisplay(snap.token, 'optimism')
+    const baSym = symbolForWalletDisplay(snap.token, 'base')
     const liSym = symbolForWalletDisplay(snap.token, 'lisk')
 
     const addrOrNull = (sym: YieldSnapshot['token'], ch: EvmChain) => {
@@ -196,10 +187,12 @@ function openConnect() {
     }
 
     const opAddr = addrOrNull(opSym, 'optimism')
+    const baAddr = addrOrNull(baSym, 'base')
     const liAddr = addrOrNull(liSym, 'lisk')
 
     const reads: Promise<bigint | null>[] = [
       opAddr ? readWalletBalance('optimism', opAddr, user) : Promise.resolve(null),
+      baAddr ? readWalletBalance('base',     baAddr, user) : Promise.resolve(null),
       liAddr ? readWalletBalance('lisk',     liAddr, user) : Promise.resolve(null),
     ]
 
@@ -215,8 +208,9 @@ function openConnect() {
     }
 
     Promise.allSettled(reads).then((vals) => {
-      const [op, li, liU, liU0] = vals.map((r) => (r.status === 'fulfilled' ? (r as any).value as bigint | null : null))
+      const [op, ba, li, liU, liU0] = vals.map((r) => (r.status === 'fulfilled' ? (r as any).value as bigint | null : null))
       setOpBal(op ?? null)
+      setBaBal(ba ?? null)
       setLiBal(li ?? null)
       setLiBalUSDT(liU ?? null)
       setLiBalUSDT0(liU0 ?? null)
@@ -235,8 +229,11 @@ function openConnect() {
 
     const destOutSymbol = mapCrossTokenForDest(snap.token, dest)
 
-    // Source is always Optimism in this build
-    const src: EvmChain = 'optimism'
+    // Source heuristic: pick OP/Base where you have more of the **display token**
+    const src: Extract<EvmChain, 'optimism' | 'base'> =
+      (opBal ?? 0n) >= amt ? 'optimism'
+      : (baBal ?? 0n) >= amt ? 'base'
+      : ((opBal ?? 0n) >= (baBal ?? 0n) ? 'optimism' : 'base')
 
     // If already on destination (rare in this UI), it's on-chain
     if (src === dest) {
@@ -244,26 +241,15 @@ function openConnect() {
       return
     }
 
-    // USDCe on Lisk → show LI.FI-style quote helper
+    // USDCe on Lisk → show LI.FI / Across-style quote helper
     if (dest === 'lisk' && destOutSymbol === 'USDCe') {
       if ((liBal ?? 0n) >= amt) {
         setRoute('On-chain'); setFee(0n); setReceived(amt); setQuoteError(null)
         return
       }
-      // NOTE: quoteUsdceOnLisk signature may need updating to remove baBal
-      quoteUsdceOnLisk({ amountIn: amt, opBal })
-        .then(q => {
-          setRoute(q.route)
-          setFee(q.bridgeFee)
-          setReceived(q.bridgeOutUSDCe)
-          setQuoteError(null)
-        })
-        .catch(() => {
-          setRoute(null)
-          setFee(0n)
-          setReceived(0n)
-          setQuoteError('Could not fetch bridge quote')
-        })
+      quoteUsdceOnLisk({ amountIn: amt, opBal, baBal })
+        .then(q => { setRoute(q.route); setFee(q.bridgeFee); setReceived(q.bridgeOutUSDCe); setQuoteError(null) })
+        .catch(() => { setRoute(null); setFee(0n); setReceived(0n); setQuoteError('Could not fetch bridge quote') })
       return
     }
 
@@ -275,7 +261,7 @@ function openConnect() {
 
     // WETH on Lisk or anything else → treat as on-chain
     setRoute('On-chain'); setFee(0n); setReceived(amt); setQuoteError(null)
-  }, [amount, walletClient, opBal, liBal, liBalUSDT, liBalUSDT0, snap.chain, snap.token, tokenDecimals])
+  }, [amount, walletClient, opBal, baBal, liBal, liBalUSDT, liBalUSDT0, snap.chain, snap.token, tokenDecimals])
 
   /* ---------------- Confirm (Morpho-only) ---------------- */
   async function handleConfirm() {
@@ -293,8 +279,10 @@ function openConnect() {
       const destTokenLabel = mapCrossTokenForDest(snap.token, dest) as 'USDCe'|'USDT0'|'WETH'
       const adapterKey = adapterKeyForSnapshot(snap)
 
-      // Source chain is fixed to Optimism
-      const srcChain = 'optimism' as const
+      // Choose src chain by higher balance of display token
+      const pickSrc = (a: bigint | null, b: bigint | null): 'optimism' | 'base' =>
+        (a ?? 0n) >= (b ?? 0n) ? 'optimism' : 'base'
+      const srcChain = pickSrc(opBal, baBal)
 
       // Map to source token symbol expected by the router
       const srcToken =
@@ -401,8 +389,10 @@ function openConnect() {
                             if (isLiskTarget) {
                               return formatUnits(liBal ?? 0n, dec)
                             }
-                            // OP balance for cross-chain sourcing
-                            return formatUnits(opBal ?? 0n, dec)
+                            // choose larger of OP/Base for cross-chain sourcing
+                            const a = opBal ?? 0n
+                            const b = baBal ?? 0n
+                            return formatUnits(a > b ? a : b, dec)
                           })()
                           setAmount(amt === '0' ? '' : amt)
                         }}
@@ -415,35 +405,33 @@ function openConnect() {
 
                   {/* Balance strip */}
                   <div className="border-t bg-gray-50 p-3 sm:p-4">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       {/* OP */}
                       <div className="rounded-lg border bg-white p-3">
                         <div className="flex items-center justify-between">
                           <ChainPill label="OP" />
-                          <span className="text-[11px] text-gray-500">
-                            {symbolForWalletDisplay(snap.token, 'optimism')}
-                          </span>
+                          <span className="text-[11px] text-gray-500">{symbolForWalletDisplay(snap.token, 'optimism')}</span>
                         </div>
                         <div className="mt-1 text-base font-semibold">{pretty(opBal)}</div>
+                      </div>
+                      {/* Base */}
+                      <div className="rounded-lg border bg-white p-3">
+                        <div className="flex items-center justify-between">
+                          <ChainPill label="BASE" />
+                          <span className="text-[11px] text-gray-500">{symbolForWalletDisplay(snap.token, 'base')}</span>
+                        </div>
+                        <div className="mt-1 text-base font-semibold">{pretty(baBal)}</div>
                       </div>
                       {/* Lisk */}
                       <div className="rounded-lg border bg-white p-3">
                         <div className="flex items-center justify-between">
                           <ChainPill label="LISK" />
-                          <span className="text-[11px] text-gray-500">
-                            {symbolForWalletDisplay(snap.token, 'lisk')}
-                          </span>
+                          <span className="text-[11px] text-gray-500">{symbolForWalletDisplay(snap.token, 'lisk')}</span>
                         </div>
                         {isLiskTarget && isUsdtFamily ? (
                           <div className="mt-1 space-y-1">
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="text-gray-500">USDT</span>
-                              <span className="font-medium">{pretty(liBalUSDT)}</span>
-                            </div>
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="text-gray-500">USDT0</span>
-                              <span className="font-medium">{pretty(liBalUSDT0)}</span>
-                            </div>
+                            <div className="flex items-center justify-between text-sm"><span className="text-gray-500">USDT</span><span className="font-medium">{pretty(liBalUSDT)}</span></div>
+                            <div className="flex items-center justify-between text-sm"><span className="text-gray-500">USDT0</span><span className="font-medium">{pretty(liBalUSDT0)}</span></div>
                           </div>
                         ) : (
                           <div className="mt-1 text-base font-semibold">{pretty(liBal)}</div>
@@ -453,12 +441,12 @@ function openConnect() {
                   </div>
                 </div>
 
-                {/* Route & Fees */}
+                {/* Routing via LI.FI bridge */}
                 <div className="rounded-xl border border-gray-200 bg-white p-4 sm:p-5">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2 text-sm font-medium">
                       <ShieldCheck className="h-4 w-4" />
-                      Route & Fees
+                      Routing via LI.FI bridge
                     </div>
                     {route && route !== 'On-chain' ? (
                       <span className="inline-flex items-center gap-2 text-xs text-gray-500">
@@ -471,31 +459,18 @@ function openConnect() {
 
                   {/* Pretty route line */}
                   <div className="mt-3 flex items-center gap-2 text-sm">
-                    <ChainPill label="OP" subtle />
+                    <ChainPill label="SRC" subtle />
                     <ArrowRight className="h-4 w-4 text-gray-400" />
                     <ChainPill label={(snap.chain as string).toUpperCase()} subtle />
-                    <span className="ml-auto text-xs text-gray-500">
-                      {snap.token} → {destTokenLabel}
-                    </span>
+                    <span className="ml-auto text-xs text-gray-500">{snap.token} → {destTokenLabel}</span>
                   </div>
 
                   <div className="mt-3 space-y-1.5">
                     {fee > 0n && (
-                      <StatRow
-                        label="Bridge fee"
-                        value={`${formatUnits(fee, tokenDecimals)} ${snap.token}`}
-                      />
+                      <StatRow label="Bridge fee" value={`${formatUnits(fee, tokenDecimals)} ${snap.token}`} />
                     )}
-                    <StatRow
-                      label="Will deposit"
-                      value={`${formatUnits(received, tokenDecimals)} ${snap.token}`}
-                      emphasize
-                    />
-                    {quoteError && (
-                      <div className="text-xs text-red-600 flex items-center gap-1">
-                        <AlertTriangle className="h-3.5 w-3.5" /> {quoteError}
-                      </div>
-                    )}
+                    <StatRow label="Will deposit" value={`${formatUnits(received, tokenDecimals)} ${snap.token}`} emphasize />
+                    {quoteError && <div className="text-xs text-red-600 flex items-center gap-1"><AlertTriangle className="h-3.5 w-3.5" /> {quoteError}</div>}
                   </div>
 
                   {isLiskTarget && (
@@ -549,7 +524,7 @@ function openConnect() {
                     variant="outline"
                     onClick={onClose}
                     title="Cancel"
-                    className="h-12 w-full sm:h-9 sm:w-auto"
+                    className="h-10 w-full  sm:w-auto"
                   >
                     Cancel
                   </Button>
@@ -557,7 +532,7 @@ function openConnect() {
                     onClick={handleConfirm}
                     disabled={confirmDisabled}
                     title="Confirm"
-                    className="h-12 w-full sm:h-9 sm:w-auto"
+                    className="h-10 w-full  sm:w-auto"
                   >
                     Confirm
                   </Button>
@@ -569,14 +544,14 @@ function openConnect() {
                   variant="outline"
                   onClick={onClose}
                   title="Close"
-                  className="h-12 w-full sm:h-9 sm:w-auto"
+                  className="h-10 w-full  sm:w-auto"
                 >
                   Close
                 </Button>
               )}
 
               {showSuccess && (
-                <Button onClick={onClose} title="Done" className="h-12 w-full sm:h-9 sm:w-auto">
+                <Button onClick={onClose} title="Done" className="h-10 w-full  sm:w-auto">
                   Done
                 </Button>
               )}
@@ -587,11 +562,11 @@ function openConnect() {
                     variant="outline"
                     onClick={() => setStep('idle')}
                     title="Try Again"
-                    className="h-12 w-full sm:h-9 sm:w-auto"
+                    className="h-10 w-full  sm:w-auto"
                   >
                     Try again
                   </Button>
-                  <Button onClick={onClose} title="Close" className="h-12 w-full sm:h-9 sm:w-auto">
+                  <Button onClick={onClose} title="Close" className="h-10 w-full  sm:w-auto">
                     Close
                   </Button>
                 </div>
@@ -621,7 +596,8 @@ function StepCard(props: { current: FlowStep, k: Exclude<FlowStep, 'idle'|'succe
       ) : active ? (
         <Loader2 className="h-4 w-4 animate-spin text-primary" />
       ) : (
-        <span className="h-4 w-4 rounded-full border" />)}
+        <span className="h-4 w-4 rounded-full border" />)
+      }
       <span className={`text-sm ${done ? 'text-green-700' : active ? 'text-primary' : 'text-muted-foreground'}`}>
         {props.label}
       </span>
