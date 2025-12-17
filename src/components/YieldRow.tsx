@@ -3,10 +3,10 @@
 
 import { FC, useState, useMemo } from 'react'
 import type { YieldSnapshot } from '@/hooks/useYields'
-import { useAppKitAccount, useAppKit } from '@reown/appkit/react'
 import { Button } from '@/components/ui/button'
 import { TokenBadge } from '@/components/TokenBadge'
 import { DepositModal } from '@/components/deposit/DepositModal'
+import { useAccount, useConnect } from 'wagmi'
 
 // Normalize Lisk vault symbols for display
 const DISPLAY_TOKEN: Record<string, string> = {
@@ -18,8 +18,15 @@ const DISPLAY_TOKEN: Record<string, string> = {
 }
 
 export const YieldRow: FC<{ snap: YieldSnapshot }> = ({ snap }) => {
-  const { address } = useAppKitAccount()
-  const { open } = useAppKit()
+  const { address, isConnected } = useAccount()
+  const { connect, connectors } = useConnect()
+
+  const openConnect = () => {
+    const safe = connectors.find((c) => c.id === 'safe')
+    const injected = connectors.find((c) => c.id === 'injected')
+    connect({ connector: safe ?? injected ?? connectors[0] })
+  }
+
   const [show, setShow] = useState(false)
 
   // We only support Morpho Blue on Lisk in this build

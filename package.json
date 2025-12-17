@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-   "dev": "next dev --webpack",
+    "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
     "lint": "next lint",
@@ -26,7 +26,6 @@
     "@radix-ui/react-tabs": "^1.1.12",
     "@radix-ui/react-tooltip": "^1.2.7",
     "@rainbow-me/rainbowkit": "^2.2.8",
-    "@reown/appkit": "^1.7.18",
     "@reown/appkit-adapter-ethers": "^1.7.18",
     "@reown/appkit-adapter-wagmi": "^1.7.18",
     "@safe-global/protocol-kit": "^6.1.1",

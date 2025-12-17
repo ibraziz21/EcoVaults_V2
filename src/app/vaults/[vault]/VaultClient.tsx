@@ -10,7 +10,7 @@ import { useMemo } from 'react'
 import { useYields, type YieldSnapshot } from '@/hooks/useYields'
 import { usePositions } from '@/hooks/usePositions'
 import { formatUnits } from 'viem'
-import { useAppKitAccount } from '@reown/appkit/react'
+
 import { ConnectWalletPrompt } from '@/components/ConnectWalletPrompt'
 import { InfoIcon } from '@phosphor-icons/react'
 import {
@@ -19,6 +19,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { useAccount } from 'wagmi'
 
 // Accept both canonical and alias slugs, normalize for lookups
 const CANONICAL: Record<string, 'USDC' | 'USDT'> = {
@@ -72,7 +73,7 @@ const HARD_FILTER = (y: Pick<YieldSnapshot, 'chain' | 'protocolKey' | 'token'>) 
 export default function VaultDetailPage() {
   const params = useParams()
   const router = useRouter()
-  const { address, isConnected } = useAppKitAccount()
+  const { address, isConnected } = useAccount()
 
   // Raw slug from URL (preserve for header/icon); also build a canonical token for queries
   const vaultSlugRaw = ((params.vault as string) || '').toUpperCase()

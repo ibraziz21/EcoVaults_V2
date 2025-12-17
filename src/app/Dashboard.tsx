@@ -10,7 +10,6 @@ import { TokenAddresses } from '@/lib/constants'
 import { MORPHO_VAULTS } from '@/lib/tvl'
 import ClaimRewards from '@/components/tables/ClaimRewardTable/ClaimReward'
 import MyPositions from '@/components/tables/MyPositionsTable/MyPositions'
-import { useAppKitAccount } from '@reown/appkit/react'
 import { ConnectWalletPrompt } from '@/components/ConnectWalletPrompt'
 import { ArrowRight } from '@phosphor-icons/react'
 import { Button } from '@/components/ui/button'
@@ -27,6 +26,7 @@ import OpIcon from "../../public/networks/op-icon.png"
 import MorphoIcon from "../../public/protocols/morpho-icon.png"
 import MerkleIcon from "../../public/protocols/merkle.png"
 import { useUsdPrices } from '@/hooks/useUSDPrices'
+import { useAccount } from 'wagmi'
 
 /** Morpho-only helper: Lisk positions → YieldSnapshot */
 function toSnapshotFromPosition(p: {
@@ -66,7 +66,7 @@ function toSnapshotFromPosition(p: {
 
 export default function Dashboard() {
   const [depositSnap, setDepositSnap] = useState<YieldSnapshot | null>(null)
-  const { address, isConnected } = useAppKitAccount()
+  const { address, isConnected } = useAccount()
   const { refetch } = useMerklRewards()
   const [selectedNetworks, setSelectedNetworks] = useState<string[]>([])
   const [selectedProtocols, setSelectedProtocols] = useState<string[]>([])

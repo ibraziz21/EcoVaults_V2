@@ -2,7 +2,6 @@
 "use client";
 
 import { useState } from "react";
-import { useAppKitAccount } from "@reown/appkit/react";
 import Vaults from "@/components/tables/VaultsTable/Vaults";
 import MyPositions from "@/components/tables/MyPositionsTable/MyPositions";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -17,10 +16,11 @@ import MerkleIcon from "../../../public/protocols/merkle.png"
 import { usePositions } from "@/hooks/usePositions";
 import { MultiSelectComboBox } from "@/components/multi-select-combobox";
 import Image from "next/image";
+import { useAccount } from "wagmi";
 
 
 export default function PositionsPage() {
-  const { address, isConnected } = useAppKitAccount();
+  const { address, isConnected } = useAccount()
 
   // Filter options
   const networkOptions = [
