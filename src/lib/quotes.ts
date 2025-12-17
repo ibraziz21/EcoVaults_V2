@@ -2,9 +2,9 @@
 'use client'
 
 import { getQuote } from '@lifi/sdk'
-import { optimism, base, lisk as liskChain } from 'viem/chains'
+import { optimism, lisk as liskChain } from 'viem/chains'
 import type { WalletClient } from 'viem'
-import { TokenAddresses } from './constants'
+import { TokenAddresses, RELAYER_LISK } from './constants'
 import type { ChainId, TokenSymbol } from './constants'
 import { configureLifiWith } from './bridge'
 
@@ -13,17 +13,16 @@ import { configureLifiWith } from './bridge'
    ──────────────────────────────────────────────────────────────── */
 const CHAIN_ID: Record<ChainId, number> = {
   optimism: optimism.id,
-  base: base.id,
   lisk: liskChain.id,
 }
 
 /** Map UI symbol to the *actual* representation on a chain for LI.FI */
 function resolveSymbolForChain(token: TokenSymbol, chain: ChainId): TokenSymbol {
   if (chain === 'lisk') {
-    if (token === 'USDC')  return 'USDCe'
+    if (token === 'USDC') return 'USDCe'
     return token
   }
-  // OP/Base cannot have USDCe/USDT0
+  // OP cannot have USDCe/USDT0
   if (token === 'USDCe') return 'USDC'
   if (token === 'USDT0') return 'USDT'
   return token
@@ -43,41 +42,58 @@ function sumIncludedFeeCosts(feeCosts: any[] | undefined): bigint {
   return feeCosts
     .filter((f) => f?.included)
     .reduce<bigint>((acc, f) => {
-      try { return acc + BigInt(f.amount ?? '0') } catch { return acc }
+      try {
+        return acc + BigInt(f.amount ?? '0')
+      } catch {
+        return acc
+      }
     }, 0n)
 }
 
-function pickSrcFromBalances(opBal: bigint | null | undefined, baBal: bigint | null | undefined, need: bigint) {
-  const op = opBal ?? 0n
-  const ba = baBal ?? 0n
-  if (op >= need) return 'optimism' as const
-  if (ba >= need) return 'base' as const
-  return op >= ba ? ('optimism' as const) : ('base' as const)
+/**
+ * In this build, deposits always source from OP (no Base).
+ * We keep the signature but ignore baBal and always return 'optimism'.
+ */
+function pickSrcFromBalances(
+  _opBal: bigint | null | undefined,
+  _baBal: bigint | null | undefined,
+  _need: bigint,
+) {
+  return 'optimism' as const
 }
 
 /* ────────────────────────────────────────────────────────────────
-   Generic quote (now supports selecting *source* token)
+   Generic quote (now forced to OP → Lisk for deposits)
    ──────────────────────────────────────────────────────────────── */
 export async function getBridgeQuote(params: {
-  token: TokenSymbol           // token desired on destination (e.g. 'USDT0' when to='lisk')
-  amount: bigint               // parsed units
+  token: TokenSymbol // token desired on destination (e.g. 'USDT0' when to='lisk')
+  amount: bigint // parsed units
   from: ChainId
   to: ChainId
-  fromAddress?: `0x${string}`  // optional; improves allowance batching
-  slippage?: number            // e.g. 0.003
-  walletClient?: WalletClient  // optional (only needed if LI.FI needs provider)
-  /** force the *source side* token symbol (USDC|USDT) */
+  fromAddress?: `0x${string}` // optional; improves allowance batching
+  slippage?: number // e.g. 0.003
+  walletClient?: WalletClient // optional (only needed if LI.FI needs provider)
+  /** force the *source side* token symbol (USDC|USDT|USDCe|USDT0) */
   fromTokenSym?: Extract<TokenSymbol, 'USDC' | 'USDT' | 'USDCe' | 'USDT0'>
 }) {
-  const { token, amount, from, to, fromAddress, slippage, walletClient, fromTokenSym } = params
+  const {
+    token,
+    amount,
+    from,
+    to,
+    fromAddress,
+    slippage,
+    walletClient,
+    fromTokenSym,
+  } = params
 
   if (walletClient) configureLifiWith(walletClient)
 
   const fromChainId = CHAIN_ID[from]
-  const toChainId   = CHAIN_ID[to]
+  const toChainId = CHAIN_ID[to]
 
-  const inputToken  = tokenAddress(fromTokenSym ?? token, from)  // respects explicit USDC/USDT
-  const outputToken = tokenAddress(token, to)                    // maps USDC->USDCe on Lisk, keeps USDT0 on Lisk
+  const inputToken = tokenAddress(fromTokenSym ?? token, from) // respects explicit USDC/USDT
+  const outputToken = tokenAddress(token, to) // maps USDC->USDCe on Lisk, keeps USDT0 on Lisk
 
   const quote = await getQuote({
     fromChain: fromChainId,
@@ -85,7 +101,9 @@ export async function getBridgeQuote(params: {
     fromToken: inputToken,
     toToken: outputToken,
     fromAmount: amount.toString(),
-    fromAddress: fromAddress!.toString(),
+    fromAddress: fromAddress!,
+    // 🔒 Destination for deposits is always RELAYER_LISK
+    toAddress: to === 'lisk' ? RELAYER_LISK : fromAddress!,
     slippage: slippage ?? 0.003,
   })
 
@@ -104,7 +122,7 @@ export async function getBridgeQuote(params: {
    Convenience wrappers to keep existing modal calls working
    ──────────────────────────────────────────────────────────────── */
 
-/** USDC → USDCe on Lisk (choose OP/Base source by balances) */
+/** USDC → USDCe on Lisk (OP-only source now) */
 export async function quoteUsdceOnLisk(params: {
   amountIn: bigint
   opBal?: bigint | null
@@ -114,7 +132,7 @@ export async function quoteUsdceOnLisk(params: {
   walletClient?: WalletClient
 }) {
   const { amountIn, opBal, baBal, fromAddress, slippage, walletClient } = params
-  const src = pickSrcFromBalances(opBal, baBal, amountIn)
+  const src = pickSrcFromBalances(opBal ?? null, baBal ?? null, amountIn) // always 'optimism'
   const q = await getBridgeQuote({
     token: 'USDCe',
     amount: amountIn,
@@ -123,7 +141,7 @@ export async function quoteUsdceOnLisk(params: {
     fromAddress,
     slippage,
     walletClient,
-    fromTokenSym: 'USDC', // explicitly source USDC on OP/Base
+    fromTokenSym: 'USDC', // explicitly source USDC on OP
   })
   return {
     route: q.route,
@@ -134,7 +152,7 @@ export async function quoteUsdceOnLisk(params: {
   }
 }
 
-/** USDT/USDC → USDT0 on Lisk (choose OP/Base source by balances; optionally pin source token) */
+/** USDT/USDC → USDT0 on Lisk (OP-only source; optionally pin source token) */
 export async function smartQuoteUsdt0Lisk(params: {
   amountIn: bigint
   opBal?: bigint | null
@@ -145,8 +163,9 @@ export async function smartQuoteUsdt0Lisk(params: {
   /** force using USDC or USDT as the source token */
   sourceToken?: Extract<TokenSymbol, 'USDC' | 'USDT'>
 }) {
-  const { amountIn, opBal, baBal, fromAddress, slippage, walletClient, sourceToken } = params
-  const src = pickSrcFromBalances(opBal, baBal, amountIn)
+  const { amountIn, opBal, baBal, fromAddress, slippage, walletClient, sourceToken } =
+    params
+  const src = pickSrcFromBalances(opBal ?? null, baBal ?? null, amountIn) // always 'optimism'
   const q = await getBridgeQuote({
     token: 'USDT0',
     amount: amountIn,
