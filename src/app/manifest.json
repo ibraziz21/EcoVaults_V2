@@ -1,6 +1,6 @@
 {
     "name": "EcoVaults (Local)",
     "description": "SuperYLDR EcoVaults test app (local/dev).",
-    "iconPath": "/eco-vaults.svg",
+    "iconPath": "@/public/eco-vaults.svg",
     "providedBy": { "name": "Lile Labs" }
   }
