@@ -6,7 +6,13 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
-import { useAccount, useChainId, useConnect, useDisconnect, useSwitchChain } from "wagmi";
+import {
+  useAccount,
+  useChainId,
+  useConnect,
+  useDisconnect,
+  useSwitchChain,
+} from "wagmi";
 
 import ecovaults from "@/public/eco-vaults.svg";
 import CopyIconSvg from "../../public/copy.svg";
@@ -64,15 +70,24 @@ function NetworkBadge() {
   );
 }
 
-function ActiveLink({ href, children }: { href: string; children: React.ReactNode }) {
+function ActiveLink({
+  href,
+  children,
+}: {
+  href: string;
+  children: React.ReactNode;
+}) {
   const pathname = usePathname();
-  const active = pathname === href || (href !== "/" && pathname.startsWith(href));
+  const active =
+    pathname === href || (href !== "/" && pathname.startsWith(href));
 
   return (
     <Link
       href={href}
       className={`rounded-xl px-3 py-2 text-sm transition ${
-        active ? "bg-[#F3F4F6] text-black font-semibold" : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
+        active
+          ? "bg-[#F3F4F6] text-black font-semibold"
+          : "text-muted-foreground hover:text-foreground hover:bg-muted/60"
       }`}
     >
       {children}
@@ -110,8 +125,10 @@ export function Navbar() {
   useEffect(() => {
     function onClick(e: MouseEvent) {
       const t = e.target as Node;
-      if (accountMenuRef.current && !accountMenuRef.current.contains(t)) setMenuOpen(false);
-      if (mobileRef.current && !mobileRef.current.contains(t) && mobileOpen) setMobileOpen(false);
+      if (accountMenuRef.current && !accountMenuRef.current.contains(t))
+        setMenuOpen(false);
+      if (mobileRef.current && !mobileRef.current.contains(t) && mobileOpen)
+        setMobileOpen(false);
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
@@ -154,7 +171,12 @@ export function Navbar() {
 
   // Optional dev connect (same behavior as your original)
   const injectedConnector = useMemo(
-    () => connectors.find((c) => c.id === "injected" || c.name?.toLowerCase().includes("metamask")),
+    () =>
+      connectors.find(
+        (c) =>
+          c.id === "injected" ||
+          c.name?.toLowerCase().includes("metamask")
+      ),
     [connectors]
   );
 
@@ -198,43 +220,58 @@ export function Navbar() {
           <div className="flex flex-shrink-0 items-center gap-2">
             {/* Mobile hamburger */}
             <button
-              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border/60 md:hidden active:scale-95 transition"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border/60 transition active:scale-95 md:hidden"
               onClick={() => setMobileOpen((v) => !v)}
               aria-label="Open menu"
               aria-expanded={mobileOpen}
               title="Menu"
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" className="opacity-80">
-                <path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                className="opacity-80"
+              >
+                <path
+                  d="M4 6h16M4 12h16M4 18h16"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
               </svg>
             </button>
 
             {/* OP-only: network badge / switch pill */}
-            {isConnected && (
-              onWrongChain ? (
+            {isConnected &&
+              (onWrongChain ? (
                 <button
                   type="button"
                   onClick={switchToOP}
                   disabled={isSwitching}
-                  className="hidden md:inline-flex h-10 items-center gap-2 rounded-[12px] border border-[#FAB55A] bg-[#FEF4E6] px-4 text-sm font-medium text-black disabled:opacity-60 hover:bg-[#FDE7CD] transition"
+                  className="hidden h-10 items-center gap-2 rounded-[12px] border border-[#FAB55A] bg-[#FEF4E6] px-4 text-sm font-medium text-black transition hover:bg-[#FDE7CD] disabled:opacity-60 md:inline-flex"
                   title="Switch network to Optimism"
                 >
                   <span className="whitespace-nowrap">Switch to OP</span>
                   <span className="relative flex h-5 w-5 items-center justify-center overflow-hidden rounded-[6px]">
-                    <Image src="/networks/op-icon.png" alt="OP Mainnet" width={20} height={20} className="h-5 w-5" />
+                    <Image
+                      src="/networks/op-icon.png"
+                      alt="OP Mainnet"
+                      width={20}
+                      height={20}
+                      className="h-5 w-5"
+                    />
                   </span>
                 </button>
               ) : (
                 <NetworkBadge />
-              )
-            )}
+              ))}
 
             {/* Wallet area */}
             {!isConnected ? (
-              <div className="hidden md:flex items-center gap-2">
+              <div className="hidden items-center gap-2 md:flex">
                 <Button
                   onClick={openInSafe}
-                  className="h-10 bg-[#376FFF] px-5 rounded-[12px] text-white hover:bg-[#2A5FCC] transition"
+                  className="h-10 rounded-[12px] bg-[#376FFF] px-5 text-white transition hover:bg-[#2A5FCC]"
                   title="Open in Safe"
                   disabled={likelySafe}
                 >
@@ -257,13 +294,17 @@ export function Navbar() {
               <div className="relative" ref={accountMenuRef}>
                 <button
                   onClick={() => setMenuOpen((v) => !v)}
-                  className="inline-flex h-10 items-center gap-2 rounded-[12px] border border-gray-200 bg-background/60 px-3 text-sm font-semibold hover:bg-muted active:scale-[.98] transition min-w-0"
+                  className="inline-flex h-10 min-w-0 items-center gap-2 rounded-[12px] border border-gray-200 bg-background/60 px-3 text-sm font-semibold transition hover:bg-muted active:scale-[.98]"
                   title="Wallet menu"
                   aria-expanded={menuOpen}
                   aria-haspopup="menu"
                 >
                   <div className="h-5 w-5 flex-shrink-0 rounded-full bg-gradient-to-br from-teal-500 to-cyan-500 ring-1 ring-black/5" />
-                  <span className="max-w-[92px] min-w-0 truncate whitespace-nowrap">{shortAddr(address)}</span>
+
+                  {/* ✅ FIXED: preserve shortAddr logic AND enforce proper truncation */}
+                  <span className="whitespace-nowrap">
+                    {shortAddr(address)}
+                  </span>
                 </button>
 
                 {menuOpen && (
@@ -272,17 +313,20 @@ export function Navbar() {
                     role="menu"
                   >
                     <div className="border-b p-3">
-                      <div className="flex flex-col justify-around w-full h-[94px] bg-[#F9FAFB] rounded-[12px] p-3">
-                        <div className="w-full flex justify-center">
+                      <div className="flex h-[94px] w-full flex-col justify-around rounded-[12px] bg-[#F9FAFB] p-3">
+                        <div className="flex w-full justify-center">
                           <div className="h-6 w-6 rounded-full bg-gradient-to-br from-teal-500 to-cyan-500 ring-1 ring-black/5" />
                         </div>
 
-                        <div className="flex justify-center items-center p-2 gap-2 min-w-0">
-                          <div className="flex min-w-0 flex-col flex-1">
-                            <span className="truncate text-[13px] font-semibold text-center" title={address}>
+                        <div className="flex min-w-0 items-center justify-center gap-2 p-2">
+                          <div className="flex min-w-0 flex-1 flex-col">
+                            <span
+                              className="truncate text-center text-[13px] font-semibold"
+                              title={address}
+                            >
                               {shortAddr(address)}
                             </span>
-                            <span className="text-[11px] text-muted-foreground text-center">
+                            <span className="text-center text-[11px] text-muted-foreground">
                               {onWrongChain ? "Wrong network" : "OP Mainnet"}
                             </span>
                           </div>
@@ -293,7 +337,7 @@ export function Navbar() {
                             height={18}
                             alt="Copy address"
                             onClick={copyAddress}
-                            className="cursor-pointer hover:opacity-70 transition flex-shrink-0"
+                            className="cursor-pointer flex-shrink-0 transition hover:opacity-70"
                           />
                           <Image
                             src={ShareIconSvg}
@@ -301,7 +345,7 @@ export function Navbar() {
                             height={18}
                             alt="View on Optimism explorer"
                             onClick={openOnOptimismExplorer}
-                            className="cursor-pointer hover:opacity-70 transition flex-shrink-0"
+                            className="cursor-pointer flex-shrink-0 transition hover:opacity-70"
                           />
                         </div>
                       </div>
@@ -309,7 +353,7 @@ export function Navbar() {
 
                     <div className="p-2">
                       <button
-                        className="flex w-full items-center justify-start rounded-md px-3 py-2 font-medium text-red-600 hover:bg-red-50 transition"
+                        className="flex w-full items-center justify-start rounded-md px-3 py-2 font-medium text-red-600 transition hover:bg-red-50"
                         onClick={() => {
                           setMenuOpen(false);
                           disconnect();
@@ -331,10 +375,17 @@ export function Navbar() {
       </header>
 
       {/* Mobile Sheet */}
-      <div className={`md:hidden fixed inset-0 z-[60] ${mobileOpen ? "" : "pointer-events-none"}`} aria-hidden={!mobileOpen}>
+      <div
+        className={`fixed inset-0 z-[60] md:hidden ${
+          mobileOpen ? "" : "pointer-events-none"
+        }`}
+        aria-hidden={!mobileOpen}
+      >
         {/* overlay */}
         <div
-          className={`absolute inset-0 bg-black/40 backdrop-blur-[2px] transition-opacity ${mobileOpen ? "opacity-100" : "opacity-0"}`}
+          className={`absolute inset-0 bg-black/40 backdrop-blur-[2px] transition-opacity ${
+            mobileOpen ? "opacity-100" : "opacity-0"
+          }`}
           onClick={() => setMobileOpen(false)}
         />
 
@@ -348,15 +399,32 @@ export function Navbar() {
           }`}
         >
           <div className="flex h-14 items-center justify-between border-b px-3">
-            <Image src={ecovaults} alt="EcoVaults" width={120} height={24} className="h-6 w-auto object-contain" priority />
+            <Image
+              src={ecovaults}
+              alt="EcoVaults"
+              width={120}
+              height={24}
+              className="h-6 w-auto object-contain"
+              priority
+            />
             <button
               onClick={() => setMobileOpen(false)}
-              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border/60 active:scale-95 transition"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-border/60 transition active:scale-95"
               aria-label="Close menu"
               title="Close"
             >
-              <svg width="20" height="20" viewBox="0 0 24 24" className="opacity-80">
-                <path d="M6 6l12 12M6 18L18 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                className="opacity-80"
+              >
+                <path
+                  d="M6 6l12 12M6 18L18 6"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
               </svg>
             </button>
           </div>
@@ -364,16 +432,18 @@ export function Navbar() {
           <div className="flex h-[calc(100%-56px)] flex-col justify-between overflow-y-auto">
             <div className="p-3">
               {/* wallet box */}
-              <div className="rounded-2xl border border-border/60 bg-white shadow-xl overflow-hidden">
+              <div className="overflow-hidden rounded-2xl border border-border/60 bg-white shadow-xl">
                 {!isConnected ? (
-                  <div className="p-4 space-y-3">
+                  <div className="space-y-3 p-4">
                     <div className="text-sm text-muted-foreground">
-                      {likelySafe ? "Waiting for Safe context…" : "Open this app in Safe{Wallet}."}
+                      {likelySafe
+                        ? "Waiting for Safe context…"
+                        : "Open this app in Safe{Wallet}."}
                     </div>
 
                     <Button
                       onClick={openInSafe}
-                      className="w-full bg-[#376FFF] text-white rounded-lg hover:bg-[#2A5FCC] transition h-10 font-semibold"
+                      className="h-10 w-full rounded-lg bg-[#376FFF] font-semibold text-white transition hover:bg-[#2A5FCC]"
                       title="Open in Safe"
                       disabled={likelySafe}
                     >
@@ -384,7 +454,7 @@ export function Navbar() {
                       <Button
                         onClick={connectDevWallet}
                         variant="secondary"
-                        className="w-full rounded-lg h-10"
+                        className="h-10 w-full rounded-lg"
                         disabled={isConnecting}
                         title="Connect wallet (dev)"
                       >
@@ -392,22 +462,27 @@ export function Navbar() {
                       </Button>
                     )}
 
-                    <div className="text-[11px] text-muted-foreground text-center">OP-only app. Safe recommended.</div>
+                    <div className="text-center text-[11px] text-muted-foreground">
+                      OP-only app. Safe recommended.
+                    </div>
                   </div>
                 ) : (
                   <>
                     <div className="border-b p-3">
-                      <div className="flex flex-col justify-around w-full h-[94px] bg-[#F9FAFB] rounded-[12px] p-3">
-                        <div className="w-full flex justify-center">
+                      <div className="flex h-[94px] w-full flex-col justify-around rounded-[12px] bg-[#F9FAFB] p-3">
+                        <div className="flex w-full justify-center">
                           <div className="h-6 w-6 rounded-full bg-gradient-to-br from-teal-500 to-cyan-500 ring-1 ring-black/5" />
                         </div>
 
-                        <div className="flex justify-center items-center p-2 gap-2 min-w-0">
-                          <div className="flex min-w-0 flex-col flex-1">
-                            <span className="truncate text-[13px] font-semibold text-center" title={address}>
+                        <div className="flex min-w-0 items-center justify-center gap-2 p-2">
+                          <div className="flex min-w-0 flex-1 flex-col">
+                            <span
+                              className="truncate text-center text-[13px] font-semibold"
+                              title={address}
+                            >
                               {shortAddr(address)}
                             </span>
-                            <span className="text-[11px] text-muted-foreground text-center">
+                            <span className="text-center text-[11px] text-muted-foreground">
                               {onWrongChain ? "Wrong network" : "OP Mainnet"}
                             </span>
                           </div>
@@ -418,7 +493,7 @@ export function Navbar() {
                             height={18}
                             alt="Copy address"
                             onClick={copyAddress}
-                            className="cursor-pointer hover:opacity-70 transition flex-shrink-0"
+                            className="cursor-pointer flex-shrink-0 transition hover:opacity-70"
                           />
                           <Image
                             src={ShareIconSvg}
@@ -426,44 +501,55 @@ export function Navbar() {
                             height={18}
                             alt="View on Optimism explorer"
                             onClick={openOnOptimismExplorer}
-                            className="cursor-pointer hover:opacity-70 transition flex-shrink-0"
+                            className="cursor-pointer flex-shrink-0 transition hover:opacity-70"
                           />
                         </div>
                       </div>
                     </div>
 
-                    <div className="p-3 space-y-2">
+                    <div className="space-y-2 p-3">
                       {onWrongChain && (
                         <button
                           type="button"
                           onClick={switchToOP}
                           disabled={isSwitching}
-                          className="w-full flex h-10 items-center justify-center gap-2 rounded-[12px] border border-[#FAB55A] bg-[#FEF4E6] px-4 text-sm font-semibold text-black disabled:opacity-60 hover:bg-[#FDE7CD] transition"
+                          className="flex h-10 w-full items-center justify-center gap-2 rounded-[12px] border border-[#FAB55A] bg-[#FEF4E6] px-4 text-sm font-semibold text-black transition hover:bg-[#FDE7CD] disabled:opacity-60"
                           title="Switch network to Optimism"
                         >
                           <span>Switch to OP Mainnet</span>
-                          <span className="flex h-7 w-7 items-center justify-center relative rounded-sm overflow-hidden flex-shrink-0">
-                            <Image src="/networks/op-icon.png" alt="OP Mainnet" width={28} height={28} className="h-7 w-7" />
+                          <span className="relative flex h-7 w-7 flex-shrink-0 items-center justify-center overflow-hidden rounded-sm">
+                            <Image
+                              src="/networks/op-icon.png"
+                              alt="OP Mainnet"
+                              width={28}
+                              height={28}
+                              className="h-7 w-7"
+                            />
                           </span>
                         </button>
                       )}
 
                       <Button
                         variant="secondary"
-                        className="w-full h-10"
+                        className="h-10 w-full"
                         onClick={copyAddress}
                         title={copied ? "Copied" : "Copy"}
                       >
                         {copied ? "Copied" : "Copy Address"}
                       </Button>
 
-                      <Button variant="secondary" className="w-full h-10" onClick={openOnOptimismExplorer} title="Explorer">
+                      <Button
+                        variant="secondary"
+                        className="h-10 w-full"
+                        onClick={openOnOptimismExplorer}
+                        title="Explorer"
+                      >
                         View on Explorer
                       </Button>
 
                       <Button
                         variant="destructive"
-                        className="w-full h-10"
+                        className="h-10 w-full"
                         onClick={() => {
                           disconnect();
                           setMobileOpen(false);

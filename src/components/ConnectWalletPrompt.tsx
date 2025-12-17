@@ -7,12 +7,10 @@ import { useAccount, useConnect } from 'wagmi'
 
 function detectSafeAppEnv(): boolean {
   if (typeof window === 'undefined') return false
-
   const isIframe = window.parent && window.parent !== window
   const host = window.location.hostname.toLowerCase()
   const isSafeHost = host === 'app.safe.global' || host.endsWith('.safe.global')
   const hasSafeParam = new URLSearchParams(window.location.search).has('safe')
-
   return Boolean(isIframe || isSafeHost || hasSafeParam)
 }
 
@@ -22,16 +20,46 @@ export function ConnectWalletPrompt() {
   const { connectAsync, connectors, isPending } = useConnect()
 
   const [isSafeApp, setIsSafeApp] = useState(false)
+  const [safeAutoConnecting, setSafeAutoConnecting] = useState(false)
 
   useEffect(() => {
     setIsSafeApp(detectSafeAppEnv())
   }, [])
 
+  // If we are inside Safe and wagmi isn't connected yet, try to connect via Safe connector once.
+  useEffect(() => {
+    let cancelled = false
+
+    async function autoConnectSafe() {
+      if (!isSafeApp || isConnected || isPending) return
+
+      const safeConn =
+        connectors.find((c) => c.id === 'safe') ??
+        connectors.find((c) => c.name?.toLowerCase().includes('safe'))
+
+      if (!safeConn) return // wagmi config likely missing Safe connector
+
+      try {
+        setSafeAutoConnecting(true)
+        await connectAsync({ connector: safeConn })
+      } catch {
+        // swallow: user can still use button / open in safe messaging
+      } finally {
+        if (!cancelled) setSafeAutoConnecting(false)
+      }
+    }
+
+    void autoConnectSafe()
+    return () => {
+      cancelled = true
+    }
+  }, [isSafeApp, isConnected, isPending, connectors, connectAsync])
+
   const primaryLabel = useMemo(() => {
     if (isConnected) return 'Continue'
-    if (isSafeApp) return 'Continue'
+    if (isSafeApp) return safeAutoConnecting ? 'Loading Safe…' : 'Continue'
     return isPending ? 'Connecting…' : 'Connect Wallet'
-  }, [isConnected, isSafeApp, isPending])
+  }, [isConnected, isSafeApp, isPending, safeAutoConnecting])
 
   const subtitle = useMemo(() => {
     if (isSafeApp) {
@@ -41,30 +69,22 @@ export function ConnectWalletPrompt() {
   }, [isSafeApp])
 
   async function onPrimary() {
-    // If already connected, just proceed.
     if (isConnected) {
       router.push('/')
       return
     }
 
-    // In Safe Apps, do NOT try to "connect" — Safe injects the signer.
-    if (isSafeApp) {
-      router.push('/')
-      return
-    }
-
-    // Outside Safe: pick best available connector (Safe → Injected → fallback).
     const safeConn =
       connectors.find((c) => c.id === 'safe') ??
       connectors.find((c) => c.name?.toLowerCase().includes('safe'))
 
     const injectedConn =
       connectors.find((c) => c.id === 'injected') ??
+      connectors.find((c) => c.name?.toLowerCase().includes('metamask')) ??
       connectors.find((c) => c.name?.toLowerCase().includes('injected'))
 
     const fallbackConn = connectors[0]
-    const connector = safeConn ?? injectedConn ?? fallbackConn
-
+    const connector = (isSafeApp ? safeConn : null) ?? injectedConn ?? fallbackConn
     if (!connector) throw new Error('No wallet connectors configured')
 
     await connectAsync({ connector })
@@ -73,8 +93,8 @@ export function ConnectWalletPrompt() {
 
   return (
     <div className="flex justify-center items-center min-h-[calc(100vh-3.5rem)] px-4">
-      <div className="w-full flex ecovaults-background bg-right bg-contain bg-no-repeat max-w-[1392px]">
-        <div className="h-[350px] w-[700px] flex flex-col max-w-[1392px] lg:ml-[100px] justify-center p-2 lg:p-0 gap-6">
+      <div className="w-full flex ecovaults-background bg-right bg-contain bg-no-repeat">
+        <div className="h-[350px] w-[700px] flex flex-col max-w-6xl lg:ml-[100px] justify-center p-2 lg:p-0 gap-6">
           <h2 className="text-3xl md:text-5xl lg:text-6xl font-semibold">
             Your gateway to <br /> smarter on-chain yields
           </h2>
@@ -84,17 +104,13 @@ export function ConnectWalletPrompt() {
           <div>
             <Button
               onClick={() => void onPrimary()}
-              className="flex bg-[#376FFF] hover:bg-[#2F5DD1] p-4 rounded-[12px] text-base h-10"
-              disabled={isPending}
+              className="flex bg-[#376FFF] p-4 py-6 rounded-xl text-base"
+              disabled={isPending || safeAutoConnecting}
               title={primaryLabel}
             >
               {primaryLabel}
             </Button>
           </div>
-        </div>
-
-        <div>
-          <br />
         </div>
       </div>
     </div>
