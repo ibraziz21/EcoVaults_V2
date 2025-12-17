@@ -127,7 +127,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
   user,
 }) => {
   const { data: walletClient } = useWalletClient()
-  import { useConnect } from 'wagmi'
+ 
 
 const { connect, connectors } = useConnect()
 
