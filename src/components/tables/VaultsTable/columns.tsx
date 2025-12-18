@@ -95,7 +95,7 @@ export const VaultsColumns: ColumnDef<Vault>[] = [
     ),
     cell: ({ row }) => {
       const network = row.getValue("network") as string;
-      const iconPath = networkIcons[network] || "/networks/default.svg";
+      const iconPath = networkIcons[network] || "/networks/op-icon.png";
 
       return (
         <div className="flex items-center justify-start gap-2">
