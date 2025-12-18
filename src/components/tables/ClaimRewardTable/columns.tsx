@@ -48,7 +48,7 @@ export const ClaimableRewardColumns: ColumnDef<ClaimableReward>[] = [
     header: ({ column }) => <DataTableColumnHeader column={column} title="Network" />,
     cell: ({ row }) => {
       const network = row.getValue("network") as string;
-      const iconPath = networkIcons[network] || "/networks/default.svg";
+      const iconPath = networkIcons[network] || "/networks/op-icon.png";
       return (
         <div className="flex items-center justify-start gap-2">
           <div className="relative h-5 w-5 rounded-md overflow-hidden">
