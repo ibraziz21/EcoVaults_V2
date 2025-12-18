@@ -47,17 +47,6 @@ const LIFI_API = process.env.LIFI_API || ''
 const OP_RPC = process.env.OP_RPC_URL || 'https://mainnet.optimism.io'
 const LSK_RPC = process.env.LISK_RPC_URL || 'https://rpc.api.lisk.com'
 
-/**
- * IMPORTANT:
- * - amountShares stored in DB is OP-side receipt “shares” (your UX units).
- * - Lisk Morpho ERC4626 vault shares are 18 decimals.
- *
- * Set this to match your OP receipt token decimals.
- * If your sVault is 18 decimals, set this to 18n (and scaling will become a no-op).
- */
-const RECEIPT_DECIMALS = 6n
-const VAULT_SHARES_DECIMALS = 18n
-
 /* ─────────────── Clients ─────────────── */
 const relayer = privateKeyToAccount(RELAYER_PK)
 const opPublic = createPublicClient({ chain: optimism, transport: http(OP_RPC) })
@@ -75,6 +64,7 @@ const ERC4626_ABI = parseAbi([
 
 const ERC20_ABI = parseAbi([
   'function balanceOf(address) view returns (uint256)',
+  'function decimals() view returns (uint8)',
 ])
 
 /* ─────────────── LI.FI server configuration ─────────────── */
@@ -132,11 +122,14 @@ async function tryLock(refId: string) {
 /* ─────────────── Helpers ─────────────── */
 function pickFamilies(dstToken: `0x${string}`) {
   const isUSDT = dstToken.toLowerCase() === (TokenAddresses.USDT.optimism as `0x${string}`).toLowerCase()
+
   return {
     rewardsVault: (isUSDT ? REWARDS_VAULT.optimismUSDT : REWARDS_VAULT.optimismUSDC) as `0x${string}`,
     morphoPool: (isUSDT ? MORPHO_POOLS['usdt0-supply'] : MORPHO_POOLS['usdce-supply']) as `0x${string}`,
     liskAsset: (isUSDT ? TokenAddresses.USDT0.lisk : TokenAddresses.USDCe.lisk) as `0x${string}`,
     opToken: (isUSDT ? TokenAddresses.USDT.optimism : TokenAddresses.USDC.optimism) as `0x${string}`,
+    // IMPORTANT: this is the OP receipt token (sVault) whose decimals define amountShares base units
+    receiptToken: (isUSDT ? TokenAddresses.sVault.optimismUSDT : TokenAddresses.sVault.optimismUSDC) as `0x${string}`,
   }
 }
 
@@ -153,17 +146,22 @@ async function readErc20Bal(
   })) as bigint
 }
 
-function scaleSharesToVault(shares: bigint) {
-  // Convert receipt “shares” decimals -> vault shares decimals (18)
-  if (BigInt(RECEIPT_DECIMALS) === BigInt(VAULT_SHARES_DECIMALS)) return shares
+async function readErc20Decimals(
+  client: typeof opPublic | typeof liskPublic,
+  token: `0x${string}`,
+) {
+  const d = (await client.readContract({
+    address: token,
+    abi: ERC20_ABI,
+    functionName: 'decimals',
+  })) as number
+  return BigInt(d)
+}
 
-  if (RECEIPT_DECIMALS < VAULT_SHARES_DECIMALS) {
-    const mul = 10n ** (VAULT_SHARES_DECIMALS - RECEIPT_DECIMALS)
-    return shares * mul
-  } else {
-    const div = 10n ** (RECEIPT_DECIMALS - VAULT_SHARES_DECIMALS)
-    return shares / div
-  }
+function scaleDecimals(amount: bigint, fromDec: bigint, toDec: bigint) {
+  if (fromDec === toDec) return amount
+  if (fromDec < toDec) return amount * 10n ** (toDec - fromDec)
+  return amount / 10n ** (fromDec - toDec)
 }
 
 async function waitForBalanceAtLeast(
@@ -211,34 +209,38 @@ export async function POST(req: Request) {
 
     const user = row.user as Address
     const dstToken = row.dstToken as `0x${string}`
-    const receiptShares = BigInt(row.amountShares) // OP-side receipt units
+
+    // amountShares stored in DB MUST be base units of the OP receipt token (sVault)
+    const receiptShares = BigInt(row.amountShares)
     const minAmountOut = BigInt(row.minAmountOut)
 
-    const { rewardsVault, morphoPool, liskAsset, opToken } = pickFamilies(dstToken)
+    const { rewardsVault, morphoPool, liskAsset, opToken, receiptToken } = pickFamilies(dstToken)
 
-    // Derive vault-share amount (18 decimals)
-    const redeemShares = scaleSharesToVault(receiptShares)
+    // Read actual decimals from chain (do NOT hardcode)
+    const receiptDecimals = await readErc20Decimals(opPublic, receiptToken)
+    const vaultDecimals = BigInt(
+      (await liskPublic.readContract({
+        address: morphoPool,
+        abi: ERC4626_ABI,
+        functionName: 'decimals',
+      })) as number,
+    )
+
+    // 0.30% buffer
+const BUFFER_BPS = 30n
+const BPS = 10_000n
+
+function applyBuffer(x: bigint) {
+  // floor(x * 9970 / 10000)
+  return (x * (BPS - BUFFER_BPS)) / BPS
+}
+    // Convert receipt shares -> vault shares (ERC4626 share token) decimals
+    const redeemSharesOG = scaleDecimals(receiptShares, receiptDecimals, vaultDecimals)
+    const redeemShares = applyBuffer(redeemSharesOG)
 
     /* 0) Preflight: make sure redeemShares produces >0 assets, and Safe has shares
           (Fail BEFORE burn to avoid accounting mismatch) */
     {
-      const vaultDecimals = BigInt(
-        (await liskPublic.readContract({
-          address: morphoPool,
-          abi: ERC4626_ABI,
-          functionName: 'decimals',
-        })) as number,
-      )
-
-      if (vaultDecimals !== VAULT_SHARES_DECIMALS) {
-        console.warn('[withdraw/finish] vault decimals unexpected', {
-          refId,
-          morphoPool,
-          vaultDecimals: vaultDecimals.toString(),
-          assumed: VAULT_SHARES_DECIMALS.toString(),
-        })
-      }
-
       const safeShareBal = await readErc20Bal(liskPublic, morphoPool, SAFEVAULT as `0x${string}`)
       const previewAssets = (await liskPublic.readContract({
         address: morphoPool,
@@ -249,7 +251,10 @@ export async function POST(req: Request) {
 
       console.log('[withdraw/finish] preflight', {
         refId,
+        receiptToken,
+        receiptDecimals: receiptDecimals.toString(),
         morphoPool,
+        vaultDecimals: vaultDecimals.toString(),
         receiptShares: receiptShares.toString(),
         redeemShares: redeemShares.toString(),
         safeShareBal: safeShareBal.toString(),
@@ -274,6 +279,8 @@ export async function POST(req: Request) {
         rewardsVault,
         user,
         amountShares: receiptShares.toString(),
+        receiptToken,
+        receiptDecimals: receiptDecimals.toString(),
       })
 
       const { request } = await opPublic.simulateContract({
@@ -390,7 +397,10 @@ export async function POST(req: Request) {
                 if (!seenFrom && (p.status === 'DONE' || p.status === 'PENDING')) {
                   seenFrom = p.txHash as `0x${string}`
                 }
-                if (p.status === 'DONE' && (['SWAP', 'CROSS_CHAIN', 'BRIDGE'] as const).includes(step.type as any)) {
+                if (
+                  p.status === 'DONE' &&
+                  (['SWAP', 'CROSS_CHAIN', 'BRIDGE'] as const).includes(step.type as any)
+                ) {
                   seenTo = p.txHash as `0x${string}`
                 }
               }
