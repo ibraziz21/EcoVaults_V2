@@ -32,7 +32,7 @@ const PIE_COLORS = ['#16a34a', '#7c3aed', '#f97316', '#38bdf8', '#ef4444']
  *  - USDCe / USDT0: 6 decimals
  */
 function decimalsFor(p: Position): number {
-  return p.token === 'WETH' ? 18 : 6
+  return  6
 }
 
 /** bigint -> number using decimals */
@@ -47,7 +47,7 @@ export const PositionsDashboard: FC = () => {
 
   // Filter to Morpho Blue on Lisk only
   const morphoLisk = useMemo(
-    () => (data ?? []).filter((p) => p.protocol === 'Morpho Blue' && p.chain === 'lisk'),
+    () => (data ?? []).filter((p) => p.protocol === 'sVault Receipt' && p.chain === 'optimism'),
     [data],
   )
 

@@ -23,7 +23,7 @@ export function ProtocolTabs() {
   // counts per tab (Morpho + Rewards only)
   const counts = useMemo(() => {
     const morphoCount =
-      positions?.filter((p) => p.protocol === 'Morpho Blue').length ?? 0
+      positions?.filter((p) => p.protocol === 'sVault Receipt').length ?? 0
     return new Map<TabValue, number>([
       ['Morpho Blue', morphoCount],
       ['Rewards', rewardsCount],

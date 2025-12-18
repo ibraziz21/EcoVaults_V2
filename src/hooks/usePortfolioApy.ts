@@ -14,7 +14,7 @@ function decimalsFor(p: Position): number {
 
 /** Treat these as $1 for naive portfolio USD weighting */
 function isStableOnAnyChain(t: Position['token']) {
-  return t === 'USDCe' || t === 'USDT0'
+  return t === 'USDC' || t === 'USDT'
 }
 
 /** Build a lookup from Morpho Blue (Lisk) snapshots: token -> apy
@@ -41,7 +41,7 @@ export function usePortfolioApy() {
 
     // Map position token -> snapshot token
     const apyForPos = (p: Position): number | undefined => {
-      const key = p.token === 'USDCe' ? 'USDC' : p.token === 'USDT0' ? 'USDT' : 'WETH'
+      const key = p.token === 'USDC' ? 'USDC' : p.token === 'USDT' ? 'USDT' : 'WETH'
       return morphoApyLookup.get(key)
     }
 

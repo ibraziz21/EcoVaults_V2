@@ -23,10 +23,9 @@ function toMorphoAccount(positions: Position[]): MorphoAccount {
   let weth  = 0n
 
   for (const p of positions) {
-    if (p.protocol !== 'Morpho Blue' || p.chain !== 'lisk') continue
-    if (p.token === 'USDCe') usdcE += p.amount
-    else if (p.token === 'USDT0') usdt0 += p.amount
-    else if (p.token === 'WETH') weth += p.amount
+    if (p.protocol !== 'sVault Receipt' || p.chain !== 'optimism') continue
+    if (p.token === 'USDC') usdcE += p.amount
+    else if (p.token === 'USDT') usdt0 += p.amount
   }
 
   return {
