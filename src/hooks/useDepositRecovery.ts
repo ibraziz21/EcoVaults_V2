@@ -33,7 +33,7 @@ export function useDepositRecovery(user?: `0x${string}`) {
       // 3) nudge finisher & poll each until terminal
       snapshot.forEach(async ({ refId }) => {
         // initial nudge
-        fetch('/api/relayer/finish', {
+        fetch('/api/depoists/finish', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ refId }),
         }).catch(() => {})
@@ -52,7 +52,7 @@ export function useDepositRecovery(user?: `0x${string}`) {
           }
           await new Promise(r => setTimeout(r, 5000))
           // periodic nudge to keep server busy (safe idempotent)
-          fetch('/api/relayer/finish', {
+          fetch('/api/deposits/finish', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ refId }),
           }).catch(() => {})
