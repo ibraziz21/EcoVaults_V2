@@ -269,7 +269,7 @@ export function Navbar() {
                   </span>
                 </button>
               ) : (
-                <NetworkBadge />
+                <NetworkBadge chainId={chainId} />
               )
             )}
 
