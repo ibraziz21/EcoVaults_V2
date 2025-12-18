@@ -10,6 +10,13 @@ import { formatUnits } from 'viem'
 
 type MorphoToken = 'USDCe' | 'USDT0' | 'WETH'
 
+type ReceiptPosition = {
+  protocol?: string
+  chain?: string
+  token?: string
+  amount?: bigint
+}
+
 export const PositionsBoard: FC<{
   onDeposit?: (p: any) => void
   onWithdraw?: (p: any) => void
@@ -17,11 +24,43 @@ export const PositionsBoard: FC<{
   const { data } = usePositions()
   const [open, setOpen] = useState<Record<string, boolean>>({})
 
-  // Only Morpho Blue positions (Lisk)
-  const morphoItems = useMemo(
-    () => (data ?? []).filter((p) => p.protocol === 'Morpho Blue'),
-    [data],
-  )
+  // Map OP receipts -> "Morpho Blue on Lisk" display items
+  const morphoItems = useMemo(() => {
+    const arr = (data ?? []) as ReceiptPosition[]
+
+    // log once per recompute
+    console.debug(
+      "[PositionsBoard] raw positions:",
+      arr.map((p) => ({
+        protocol: p?.protocol,
+        chain: p?.chain,
+        token: p?.token,
+        amount: typeof p?.amount === "bigint" ? p.amount.toString() : String(p?.amount),
+      }))
+    )
+
+    // Only receipts
+    const receipts = arr.filter((p) =>
+      String(p?.protocol ?? '').toLowerCase() === 'svault receipt' &&
+      String(p?.chain ?? '').toLowerCase() === 'optimism' &&
+      (String(p?.token ?? '').toUpperCase() === 'USDC' || String(p?.token ?? '').toUpperCase() === 'USDT') &&
+      typeof p?.amount === 'bigint' &&
+      p.amount > 0n
+    )
+
+    // Convert to the shape PositionCard expects (Morpho Blue, lisk, token: USDCe/USDT0, amount bigint)
+    return receipts.map((p) => {
+      const t = String(p.token).toUpperCase()
+      const token: MorphoToken = t === 'USDT' ? 'USDT0' : 'USDCe'
+      return {
+        protocol: 'Morpho Blue' as const,
+        chain: 'lisk' as const,
+        token,
+        // receipt is 6 decimals and is used as "deposit amount" display
+        amount: p.amount as bigint,
+      }
+    })
+  }, [data])
 
   if (morphoItems.length === 0) return null
 

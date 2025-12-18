@@ -6,116 +6,44 @@ import MyPositionsTable from ".";
 import { MyPositionsColumns, type Position as TableRow } from "./columns";
 import { usePositions } from "@/hooks/usePositions";
 import { useYields, type YieldSnapshot } from "@/hooks/useYields";
-import {
-  type Position as BasePosition,
-  DUST_SHARES,
-} from "@/lib/positions";
-import { MORPHO_POOLS, TokenAddresses } from "@/lib/constants";
+import { formatUnits } from "viem";
 
-type EvmChain = "lisk";
-type MorphoToken = "USDCe" | "USDT0" | "WETH";
+type ReceiptToken = "USDC" | "USDT";
+type VaultRouteKey = "USDCe" | "USDT0";
+type DisplayVault = "Re7 USDC.e" | "Re7 USDT0";
 
-type PositionLike =
-  | BasePosition
-  | {
-    protocol: "Morpho Blue";
-    chain: Extract<EvmChain, "lisk">;
-    token: MorphoToken;
-    amount: bigint;
-  };
-
-const CHAIN_LABEL: Record<EvmChain, string> = { lisk: "Lisk" };
-
-const MORPHO_VAULT_BY_TOKEN: Record<MorphoToken, `0x${string}`> = {
-  USDCe: MORPHO_POOLS["usdce-supply"] as `0x${string}`,
-  USDT0: MORPHO_POOLS["usdt0-supply"] as `0x${string}`,
-  WETH: MORPHO_POOLS["weth-supply"] as `0x${string}`,
+type ReceiptPosition = {
+  protocol: "sVault Receipt";
+  chain: "optimism";
+  token: ReceiptToken;
+  amount: bigint;
 };
-
-const TOKEN_DECIMALS: Record<MorphoToken, number> = {
-  USDCe: 6,
-  USDT0: 6,
-  WETH: 18,
-};
-
-export function formatAmountBigint(amount: bigint, decimals: number): string {
-  const neg = amount < 0n;
-  const abs = neg ? -amount : amount;
-
-  const base = 10n ** BigInt(decimals);
-  const whole = abs / base;
-  const frac = abs % base;
-
-  const wholeStr = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  if (frac === 0n) return `${neg ? "-" : ""}${wholeStr}`;
-
-  let fracStr = frac.toString().padStart(decimals, "0");
-  fracStr = fracStr.slice(0, Math.min(6, fracStr.length));
-  fracStr = fracStr.replace(/0+$/, "");
-  return `${neg ? "-" : ""}${wholeStr}${fracStr ? "." + fracStr : ""}`;
-}
 
 function formatPercent(n: number): string {
   return (Number.isFinite(n) ? n : 0).toFixed(2);
 }
 
-function normalizeDisplayVault(token: string): string {
-  if (token === "USDCe") return "Re7 USDC.e";
-  if (token === "USDT0") return "Re7 USDT0";
-  if (token === "WETH") return "Re7 WETH";
-  return token;
+function receiptToVault(token: ReceiptToken): {
+  routeKey: VaultRouteKey;
+  displayVault: DisplayVault;
+  canonicalUnderlying: "USDC" | "USDT";
+} {
+  if (token === "USDT") {
+    return { routeKey: "USDT0", displayVault: "Re7 USDT0", canonicalUnderlying: "USDT" };
+  }
+  return { routeKey: "USDCe", displayVault: "Re7 USDC.e", canonicalUnderlying: "USDC" };
 }
 
-function findSnapshotForPosition(
-  p: PositionLike,
+function findMorphoLiskSnapshot(
+  canonicalUnderlying: "USDC" | "USDT",
   snapshots: YieldSnapshot[] | undefined
-): YieldSnapshot {
-  const normToken = String(p.token).toLowerCase();
-
-  const direct = snapshots?.find(
+): YieldSnapshot | undefined {
+  return snapshots?.find(
     (y) =>
-      y.chain === p.chain &&
+      y.chain === "lisk" &&
       y.protocolKey === "morpho-blue" &&
-      String(y.token).toLowerCase() ===
-      (normToken === "usdce"
-        ? "usdc"
-        : normToken === "usdt0"
-          ? "usdt"
-          : normToken)
+      String(y.token).toUpperCase() === canonicalUnderlying
   );
-  if (direct) return direct;
-
-  const vault = MORPHO_VAULT_BY_TOKEN[p.token as MorphoToken];
-  if (vault) {
-    const byVault = snapshots?.find(
-      (y) =>
-        y.protocolKey === "morpho-blue" &&
-        y.chain === "lisk" &&
-        y.poolAddress?.toLowerCase() === vault.toLowerCase()
-    );
-    if (byVault) return byVault;
-  }
-
-  const underlyingAddr: `0x${string}` =
-    p.token === "USDCe"
-      ? (TokenAddresses.USDCe as any).lisk
-      : p.token === "USDT0"
-        ? (TokenAddresses.USDT0 as any).lisk
-        : (TokenAddresses.WETH as any).lisk;
-
-  const fallback: YieldSnapshot = {
-    id: `fallback-Morpho-${p.chain}-${String(p.token)}`,
-    chain: p.chain as any,
-    protocol: "Morpho Blue",
-    protocolKey: "morpho-blue",
-    poolAddress: vault ?? "0x0000000000000000000000000000000000000000",
-    token: p.token as any,
-    apy: 0,
-    tvlUSD: 0,
-    updatedAt: new Date().toISOString(),
-    underlying: underlyingAddr,
-  };
-  return fallback;
 }
 
 interface MyPositionsProps {
@@ -132,53 +60,70 @@ const MyPositions: React.FC<MyPositionsProps> = ({
   const { data: positionsRaw, isLoading: positionsLoading } = usePositions();
   const { yields: snapshots, isLoading: yieldsLoading } = useYields();
 
-  const positions = useMemo(
-    () => (positionsRaw ?? []) as unknown as PositionLike[],
-    [positionsRaw]
-  );
+  const receiptPositions = useMemo(() => {
+    const arr = (positionsRaw ?? []) as any[];
 
-  const positionsForMorpho: PositionLike[] = useMemo(() => {
-    return positions.filter((p) => {
-      if (p.protocol !== "Morpho Blue") return false;
-      if (p.chain !== "lisk") return false;
+    // Debug what we received (helps catch mismatched protocol/chain names)
+    console.debug(
+      "[MyPositions] positionsRaw:",
+      arr.map((p) => ({
+        protocol: p?.protocol,
+        chain: p?.chain,
+        token: p?.token,
+        amount: typeof p?.amount === "bigint" ? p.amount.toString() : String(p?.amount),
+      }))
+    );
 
-      const amt = (p as any).amount as bigint | undefined;
-      if (typeof amt !== "bigint") return false;
-
-      // same dust cutoff as lib/positions
-      return amt > DUST_SHARES;
-    });
-  }, [positions]);
+    return arr
+      .filter((p): p is ReceiptPosition => {
+        const protocolOk = String(p?.protocol ?? "").toLowerCase() === "svault receipt";
+        const chainOk = String(p?.chain ?? "").toLowerCase() === "optimism";
+        const token = String(p?.token ?? "").toUpperCase();
+        const tokenOk = token === "USDC" || token === "USDT";
+        const amtOk = typeof p?.amount === "bigint";
+        return protocolOk && chainOk && tokenOk && amtOk;
+      })
+      .map((p) => ({
+        protocol: "sVault Receipt" as const,
+        chain: "optimism" as const,
+        token: String(p.token).toUpperCase() as ReceiptToken,
+        amount: (p.amount ?? 0n) as bigint,
+      }));
+  }, [positionsRaw]);
 
   const tableData: TableRow[] = useMemo(() => {
-    let filtered = positionsForMorpho.map((p) => {
-      const snap = findSnapshotForPosition(p, snapshots);
-      const depositsHuman = formatAmountBigint(p.amount ?? 0n, 18);
+    let rows: TableRow[] = receiptPositions
+      // only show non-zero positions
+      .filter((p) => (p.amount ?? 0n) > 0n)
+      .map((p) => {
+        const { routeKey, displayVault, canonicalUnderlying } = receiptToVault(p.token);
 
-      const tokenSymbol = String(p.token); // "USDCe" | "USDT0" | "WETH"
+        // receipts are 6 decimals; keep deposits as plain numeric string (NO commas)
+        const depositsNumericStr = String(formatUnits(p.amount ?? 0n, 6));
 
-      return {
-        // Display text on the row
-        vault: normalizeDisplayVault(tokenSymbol), // e.g. "Re7 USDC.e"
-        // Canonical route key for URLs
-        routeKey: tokenSymbol, // used by MyPositionsTable for /vaults/USDCe
-        network: CHAIN_LABEL[p.chain],
-        deposits: depositsHuman,
-        protocol: "Morpho Blue",
-        apy: formatPercent(snap.apy),
-      };
-    });
+        const snap = findMorphoLiskSnapshot(canonicalUnderlying, snapshots);
+        const apy = snap ? formatPercent(Number(snap.apy) || 0) : formatPercent(0);
+
+        return {
+          vault: displayVault,        // UI text stays the same format you already use
+          routeKey,                   // used by row click -> /vaults/USDCe or /vaults/USDT0
+          network: "Lisk",            // vault lives on Lisk (UI expectation)
+          deposits: depositsNumericStr,
+          protocol: "Morpho Blue",
+          apy,
+        };
+      });
 
     if (networkFilter && networkFilter.length > 0 && !networkFilter.includes("all")) {
-      filtered = filtered.filter((row) => networkFilter.includes(row.network));
+      rows = rows.filter((row) => networkFilter.includes(row.network));
     }
 
     if (protocolFilter && protocolFilter.length > 0 && !protocolFilter.includes("all")) {
-      filtered = filtered.filter((row) => protocolFilter.includes(row.protocol));
+      rows = rows.filter((row) => protocolFilter.includes(row.protocol));
     }
 
-    return filtered;
-  }, [positionsForMorpho, snapshots, networkFilter, protocolFilter]);
+    return rows;
+  }, [receiptPositions, snapshots, networkFilter, protocolFilter]);
 
   if (positionsLoading || yieldsLoading) {
     return (

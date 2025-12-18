@@ -23,10 +23,19 @@ import AlertIconModal from '../../../public/alert-icon-modal.svg'
 
 type ChainSel = 'optimism'
 type FlowStep = 'idle' | 'withdrawing' | 'bridging' | 'success' | 'error'
+interface WithdrawSuccessData {
+  liskAmount: number
+  liskToken: 'USDCe' | 'USDT0' | 'WETH'
+  destAmount?: number
+  destToken?: 'USDC' | 'USDT' | 'WETH'
+  destChain?: 'optimism' | 'base' | 'lisk'
+  vault: string
+}
 
 interface Props {
   open: boolean
   onClose: () => void
+  onSuccess: (data: WithdrawSuccessData) => void
   snap: Pick<YieldSnapshot, 'token' | 'chain'> & { poolAddress: `0x${string}` } // token: 'USDC' | 'USDT', chain: 'lisk'
   shares: bigint
   amountOnLiskDisplay: number
@@ -144,6 +153,7 @@ function StepHintRow({ hint }: { hint: string }) {
 export const ReviewWithdrawModal: FC<Props> = ({
   open,
   onClose,
+  onSuccess,
   snap,
   shares,
   amountOnLiskDisplay,
@@ -356,6 +366,14 @@ export const ReviewWithdrawModal: FC<Props> = ({
 
       setBridgeDone(true)
       setStep('success')
+      onSuccess({
+        liskAmount: netOnLisk,
+        liskToken,
+        destAmount: netOnDest,
+        destToken: destSymbol,
+        destChain: dest,
+        vault: `Re7 ${snap.token} Vault (Morpho Blue)`,
+      })
       setShowSuccess(true)
     } catch (e: any) {
       console.error('[withdraw modal] handleConfirm failed:', e)

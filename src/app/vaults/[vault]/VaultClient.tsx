@@ -51,8 +51,8 @@ const networkIcons: Record<string, string> = {
 
 // Protocol icon mapping
 const protocolIcons: Record<string, string> = {
-  'Morpho Blue': '/protocols/morpho-icon.png', // Added this key
-  Morpho: '/protocols/morpho-icon.png', // Keep as fallback
+  'Morpho Blue': '/protocols/morpho-icon.png',
+  Morpho: '/protocols/morpho-icon.png',
 }
 
 // Normalize for display parity with YieldRow (underlying → canonical)
@@ -81,13 +81,13 @@ export default function VaultDetailPage() {
   const vaultCanonical: 'USDC' | 'USDT' | undefined = CANONICAL[vaultSlugKey]
   const headerLabel = vaultSlugKey || 'Vault'
 
-  // 🔹 Human-facing label for the header
+  // Human-facing label for the header
   const headerDisplayLabel =
     ['USDC', 'USDCE', 'USDC.E'].includes(vaultSlugKey)
       ? 'USDC.e'
       : headerLabel
 
-  // ── Hooks must always run, regardless of connection state ──
+  // ── Hooks must always run ──
   const { yields, isLoading, error } = useYields()
   const { data: positionsRaw } = usePositions()
 
@@ -109,33 +109,65 @@ export default function VaultDetailPage() {
 
   const primaryVariant = vaultVariants[0] // we only have Lisk/Morpho for now
 
-  // User shares: on Morpho Lisk, the share token is 18d; map header label to underlying
-  const userShares = useMemo(() => {
+  /**
+   * ✅ Total deposits (My Positions)
+   * Your positions source is OP sVault receipt tokens.
+   * They are 6 decimals, and positions look like:
+   *   { protocol: 'sVault Receipt', chain: 'optimism', token: 'USDC' | 'USDT', amount: bigint }
+   */
+  const receiptTokenOnOp: 'USDC' | 'USDT' | undefined = useMemo(() => {
+    if (!vaultCanonical) return undefined
+    return vaultCanonical === 'USDT' ? 'USDT' : 'USDC'
+  }, [vaultCanonical])
+
+  const userDepositsShares = useMemo(() => {
     const positions = (positionsRaw ?? []) as any[]
 
-    // If user visited alias, keep it; otherwise map canonical to underlying alias
-    const morphoToken =
-      vaultSlugKey === 'USDT0' || vaultSlugKey === 'USDCe'
-        ? vaultSlugKey
-        : vaultCanonical === 'USDC'
-          ? 'USDCe'
-          : vaultCanonical === 'USDT'
-            ? 'USDT0'
-            : vaultSlugKey
+    // Debug logs
+    console.debug('[vault] slugKey:', vaultSlugKey, 'canonical:', vaultCanonical, 'receiptTokenOnOp:', receiptTokenOnOp)
+    console.debug(
+      '[vault] positionsRaw:',
+      positions.map((p) => ({
+        protocol: p?.protocol,
+        chain: p?.chain,
+        token: p?.token,
+        amount: typeof p?.amount === 'bigint' ? p.amount.toString() : String(p?.amount),
+      }))
+    )
+
+    if (!receiptTokenOnOp) return 0n
 
     const pos = positions.find(
       (p) =>
-        p?.protocol === 'Morpho Blue' &&
-        String(p?.chain).toLowerCase() === 'lisk' &&
-        String(p?.token) === morphoToken
+        p?.protocol === 'sVault Receipt' &&
+        String(p?.chain).toLowerCase() === 'optimism' &&
+        String(p?.token).toUpperCase() === receiptTokenOnOp
     )
-    return (pos?.amount ?? 0n) as bigint
-  }, [positionsRaw, vaultCanonical, vaultSlugKey])
 
-  const userSharesHuman = useMemo(() => {
-    const num = Number(formatUnits(userShares, 18))
-    return Number.isFinite(num) ? num : 0
-  }, [userShares])
+    console.debug('[vault] matchedPosition:', pos ? {
+      protocol: pos?.protocol,
+      chain: pos?.chain,
+      token: pos?.token,
+      amount: typeof pos?.amount === 'bigint' ? pos.amount.toString() : String(pos?.amount),
+    } : null)
+
+    return (pos?.amount ?? 0n) as bigint
+  }, [positionsRaw, receiptTokenOnOp, vaultSlugKey, vaultCanonical])
+
+  // ✅ Receipt token is 6 decimals
+  const RECEIPT_DECIMALS = 6
+
+  // For stable vaults, shares are treated 1:1 in UI as deposited amount in that stable.
+  const userDepositsHuman = useMemo(() => {
+    try {
+      const s = formatUnits(userDepositsShares, RECEIPT_DECIMALS)
+      const num = Number(s)
+      return Number.isFinite(num) ? num : 0
+    } catch (e) {
+      console.debug('[vault] formatUnits error:', e)
+      return 0
+    }
+  }, [userDepositsShares])
 
   // Choose the snapshot by canonical token (works for USDT0/USDCe routes)
   const snapCandidate = (yields ?? []).find(
@@ -145,9 +177,8 @@ export default function VaultDetailPage() {
       (DISPLAY_TOKEN[s.token] ?? s.token) === vaultCanonical
   )
 
-  // ── Only rendering branches below this line, no new hooks ──
+  // ── Only rendering branches below this line ──
 
-  // Show wallet prompt if not connected
   if (!isConnected || !address) {
     return <ConnectWalletPrompt />
   }
@@ -160,7 +191,6 @@ export default function VaultDetailPage() {
     )
   }
 
-  // If the slug is unknown or we couldn't find a matching Lisk/Morpho vault for it
   if (error || !vaultCanonical || vaultVariants.length === 0) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -179,7 +209,7 @@ export default function VaultDetailPage() {
     <TooltipProvider>
       <div className="min-h-[calc(100vh-3.5rem)] bg-[#F9FAFB] p-4 md:p-6">
         <div className="max-w-[1182px] mx-auto">
-          {/* Header with back button */}
+          {/* Header */}
           <div className="mb-6">
             <div className="flex items-center gap-3 md:gap-4">
               <Image
@@ -191,22 +221,22 @@ export default function VaultDetailPage() {
               />
               <div>
                 <h1 className="text-xl md:text-2xl font-semibold">
-                  Re7 {headerDisplayLabel} <span className="text-[#9CA3AF]">Vault</span>
+                  Re7 {headerDisplayLabel}{' '}
+                  <span className="text-[#9CA3AF]">Vault</span>
                 </h1>
-
               </div>
             </div>
           </div>
 
           {/* Main Content Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
-            {/* Left Column - Overview & Positions */}
+            {/* Left Column */}
             <div className="space-y-6">
               {/* Overview Stats */}
               <div className="bg-white rounded-xl p-6">
                 <h2 className="text-[16px] font-semibold mb-4">Overview</h2>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* Network Card */}
+                  {/* Network */}
                   <Card className="rounded-2xl border-[1.5px] border-gray-200 bg-white shadow-none">
                     <CardContent className="space-y-1 p-4 h-[128px] flex flex-col justify-between">
                       <p className="text-[14px] font-normal tracking-wide text-[#4B5563] flex items-center">
@@ -218,7 +248,9 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">The blockchain network where this vault operates. Currently only Lisk network is supported.</p>
+                            <p className="max-w-xs">
+                              The blockchain network where this vault operates. Currently only Lisk network is supported.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
@@ -237,7 +269,7 @@ export default function VaultDetailPage() {
                     </CardContent>
                   </Card>
 
-                  {/* Protocol Card */}
+                  {/* Protocol */}
                   <Card className="rounded-2xl border-[1.5px] border-gray-200 bg-white shadow-none">
                     <CardContent className="space-y-1 p-4 h-[128px] flex flex-col justify-between">
                       <p className="text-[14px] font-normal tracking-wide text-[#4B5563] flex items-center">
@@ -249,7 +281,9 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">The DeFi protocol used for yield generation. This vault uses Morpho Blue for decentralized lending.</p>
+                            <p className="max-w-xs">
+                              The DeFi protocol used for yield generation. This vault uses Morpho Blue for decentralized lending.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
@@ -268,7 +302,7 @@ export default function VaultDetailPage() {
                     </CardContent>
                   </Card>
 
-                  {/* TVL Card */}
+                  {/* TVL */}
                   <Card className="rounded-2xl border-[1.5px] border-gray-200 bg-white shadow-none">
                     <CardContent className="space-y-1 p-4 h-[128px] flex flex-col justify-between">
                       <p className="text-[14px] font-normal tracking-wide text-[#4B5563] flex items-center">
@@ -280,11 +314,13 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">Total Value Locked across all variants of this vault. Represents the sum of all deposits from all users.</p>
+                            <p className="max-w-xs">
+                              Total Value Locked across all variants of this vault. Represents the sum of all deposits from all users.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
-                      <p className=" text-[20px] font-semibold">
+                      <p className="text-[20px] font-semibold">
                         $
                         {vaultVariants
                           .reduce((sum, v) => sum + Number((v.tvl || '0').toString().replace(/,/g, '')), 0)
@@ -293,7 +329,7 @@ export default function VaultDetailPage() {
                     </CardContent>
                   </Card>
 
-                  {/* APY Card */}
+                  {/* APY */}
                   <Card className="rounded-2xl border-[1.5px] border-gray-200 bg-white shadow-none">
                     <CardContent className="space-y-1 p-4 h-[128px] flex flex-col justify-between">
                       <p className="text-[14px] font-normal tracking-wide text-[#4B5563] flex items-center">
@@ -305,11 +341,13 @@ export default function VaultDetailPage() {
                             </span>
                           </TooltipTrigger>
                           <TooltipContent>
-                            <p className="max-w-xs">Annual Percentage Yield based on current rates. This is an estimate and may fluctuate based on market conditions.</p>
+                            <p className="max-w-xs">
+                              Annual Percentage Yield based on current rates. This is an estimate and may fluctuate based on market conditions.
+                            </p>
                           </TooltipContent>
                         </Tooltip>
                       </p>
-                      <p className=" text-[20px] font-semibold">
+                      <p className="text-[20px] font-semibold">
                         {(
                           vaultVariants.reduce((sum, v) => sum + Number(v.apy || 0), 0) /
                           (vaultVariants.length || 1)
@@ -335,13 +373,15 @@ export default function VaultDetailPage() {
                           </span>
                         </TooltipTrigger>
                         <TooltipContent>
-                          <p className="max-w-xs">Your personal deposit amount in this specific vault. Does not include your deposits in other vaults.</p>
+                          <p className="max-w-xs">
+                            Your personal deposits into this vault, based on your OP sVault receipt token balance (6 decimals).
+                          </p>
                         </TooltipContent>
                       </Tooltip>
                     </p>
-                    <p className=" text-[20px] font-semibold text-left">
-                      ${' '}
-                      {userSharesHuman.toLocaleString(undefined, {
+                    <p className="text-[20px] font-semibold text-left">
+                      $
+                      {userDepositsHuman.toLocaleString(undefined, {
                         maximumFractionDigits: 2,
                       })}
                     </p>
