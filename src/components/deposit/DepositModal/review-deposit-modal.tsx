@@ -288,7 +288,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       setError(null)
       setStep('depositing')
 
-      const res = await fetch('/api/relayer/finish', {
+      const res = await fetch('/api/deposits/finish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -407,7 +407,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
 
       // 5) Attach route info (non-fatal)
       try {
-        await fetch('/api/relayer/route-progress', {
+        await fetch('/api/deposits/route-progress', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -425,7 +425,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       setBridgeOk(true)
       setStep('depositing')
 
-      const finishRes = await fetch('/api/relayer/finish', {
+      const finishRes = await fetch('/api/deposits/finish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
