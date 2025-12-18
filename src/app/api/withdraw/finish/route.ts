@@ -227,7 +227,7 @@ export async function POST(req: Request) {
     )
 
     // 0.30% buffer
-const BUFFER_BPS = 30n
+const BUFFER_BPS = 50n
 const BPS = 10_000n
 
 function applyBuffer(x: bigint) {
