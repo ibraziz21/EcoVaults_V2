@@ -12,6 +12,7 @@ import {
   http,
   parseAbi,
   isAddress,
+  type Address,
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { optimism, lisk } from 'viem/chains'
@@ -22,33 +23,21 @@ import type { MetaTransactionData } from '@safe-global/types-kit'
 import { OperationType } from '@safe-global/types-kit'
 
 // LI.FI (server-side)
-import {
-  createConfig,
-  EVM,
-  getQuote,
-  convertQuoteToRoute,
-  executeRoute,
-} from '@lifi/sdk'
+import { createConfig, EVM, getQuote, convertQuoteToRoute, executeRoute } from '@lifi/sdk'
 
 // Contracts / constants
 import rewardsVaultAbi from '@/lib/abi/rewardsAbi.json'
-import {
-  TokenAddresses,
-  SAFEVAULT,
-  MORPHO_POOLS,
-  REWARDS_VAULT,
-} from '@/lib/constants'
+import { TokenAddresses, SAFEVAULT, MORPHO_POOLS, REWARDS_VAULT } from '@/lib/constants'
 
 // State guard
 import { advanceWithdraw } from '@/domain/advance'
-import type { WithdrawState } from '@/domain/states'
 
 /* ─────────────── Env & helpers ─────────────── */
 const PK_RE = /^0x[0-9a-fA-F]{64}$/
 function normalizePrivateKey(raw?: string): `0x${string}` {
   const s = (raw ?? '').trim().replace(/^['"]|['"]$/g, '')
   if (!s) throw new Error('RELAYER_PRIVATE_KEY is missing')
-  const with0x = (`0x${s.replace(/^0x/i, '')}`.toLowerCase()) as `0x${string}`
+  const with0x = ('0x' + s.replace(/^0x/i, '')).toLowerCase() as `0x${string}`
   if (!PK_RE.test(with0x)) throw new Error('RELAYER_PRIVATE_KEY format invalid')
   return with0x
 }
@@ -58,32 +47,34 @@ const LIFI_API = process.env.LIFI_API || ''
 const OP_RPC = process.env.OP_RPC_URL || 'https://mainnet.optimism.io'
 const LSK_RPC = process.env.LISK_RPC_URL || 'https://rpc.api.lisk.com'
 
+/**
+ * IMPORTANT:
+ * - amountShares stored in DB is OP-side receipt “shares” (your UX units).
+ * - Lisk Morpho ERC4626 vault shares are 18 decimals.
+ *
+ * Set this to match your OP receipt token decimals.
+ * If your sVault is 18 decimals, set this to 18n (and scaling will become a no-op).
+ */
+const RECEIPT_DECIMALS = 6n
+const VAULT_SHARES_DECIMALS = 18n
+
 /* ─────────────── Clients ─────────────── */
 const relayer = privateKeyToAccount(RELAYER_PK)
-
 const opPublic = createPublicClient({ chain: optimism, transport: http(OP_RPC) })
-const opWallet = createWalletClient({
-  chain: optimism,
-  transport: http(OP_RPC),
-  account: relayer,
-})
-
+const opWallet = createWalletClient({ chain: optimism, transport: http(OP_RPC), account: relayer })
 const liskPublic = createPublicClient({ chain: lisk, transport: http(LSK_RPC) })
-const liskWallet = createWalletClient({
-  chain: lisk,
-  transport: http(LSK_RPC),
-  account: relayer,
-})
+const liskWallet = createWalletClient({ chain: lisk, transport: http(LSK_RPC), account: relayer })
 
 /* ─────────────── ABIs ─────────────── */
-const ERC20_ABI = parseAbi([
-  'function balanceOf(address) view returns (uint256)',
+const ERC4626_ABI = parseAbi([
+  'function asset() view returns (address)',
+  'function decimals() view returns (uint8)',
+  'function previewRedeem(uint256 shares) view returns (uint256 assets)',
+  'function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)',
 ])
 
-// Treat MORPHO_POOLS[...] as an ERC-4626 vault address.
-// Shares are held by the Safe; redeem pulls underlying out to relayer.
-const ERC4626_ABI = parseAbi([
-  'function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)',
+const ERC20_ABI = parseAbi([
+  'function balanceOf(address) view returns (uint256)',
 ])
 
 /* ─────────────── LI.FI server configuration ─────────────── */
@@ -95,7 +86,6 @@ function ensureLifiServer() {
     apiKey: LIFI_API || undefined,
     providers: [
       EVM({
-        // executeRoute will ask for a wallet client; it may also switch chains.
         getWalletClient: async () => liskWallet,
         switchChain: async (chainId: number) => {
           if (chainId === lisk.id) return liskWallet
@@ -115,7 +105,6 @@ function bad(m: string, s = 400) {
   return json({ ok: false, error: m }, s)
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const nowSec = () => Math.floor(Date.now() / 1000)
 
 /* ─────────────── Prisma lock (idempotency) ─────────────── */
 async function tryLock(refId: string) {
@@ -126,7 +115,7 @@ async function tryLock(refId: string) {
         { status: { in: ['PENDING', 'FAILED'] } },
         {
           status: { in: ['PROCESSING', 'BURNED', 'REDEEMING', 'REDEEMED', 'BRIDGING'] },
-          updatedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) }, // stale processing
+          updatedAt: { lt: new Date(Date.now() - 10 * 60 * 1000) },
         },
       ],
     },
@@ -135,44 +124,28 @@ async function tryLock(refId: string) {
   if (res.count === 1) return { ok: true }
 
   const row = await prisma.withdrawIntent.findUnique({ where: { refId } })
-  if (!row) return { ok: false, reason: 'Unknown refId' }
-  if (row.status === 'SUCCESS') return { ok: false, reason: 'Already done', stage: row.status }
-  return { ok: false, reason: 'Already processing', stage: row.status }
+  if (!row) return { ok: false, reason: 'Unknown refId' as const }
+  if (row.status === 'SUCCESS') return { ok: false, reason: 'Already done' as const, stage: row.status }
+  return { ok: false, reason: 'Already processing' as const, stage: row.status }
 }
 
 /* ─────────────── Helpers ─────────────── */
 function pickFamilies(dstToken: `0x${string}`) {
-  const isUSDT =
-    dstToken.toLowerCase() ===
-    (TokenAddresses.USDT.optimism as `0x${string}`).toLowerCase()
-
+  const isUSDT = dstToken.toLowerCase() === (TokenAddresses.USDT.optimism as `0x${string}`).toLowerCase()
   return {
-    rewardsVault: (isUSDT
-      ? REWARDS_VAULT.optimismUSDT
-      : REWARDS_VAULT.optimismUSDC) as `0x${string}`,
-
-    // This is the Lisk vault address whose shares the Safe holds.
-    morphoPool: (isUSDT
-      ? MORPHO_POOLS['usdt0-supply']
-      : MORPHO_POOLS['usdce-supply']) as `0x${string}`,
-
-    // Underlying token on Lisk that relayer receives after redeem.
-    liskAsset: (isUSDT
-      ? TokenAddresses.USDT0.lisk
-      : TokenAddresses.USDCe.lisk) as `0x${string}`,
-
-    // Destination token on OP that user receives after bridging.
-    opToken: (isUSDT
-      ? TokenAddresses.USDT.optimism
-      : TokenAddresses.USDC.optimism) as `0x${string}`,
+    rewardsVault: (isUSDT ? REWARDS_VAULT.optimismUSDT : REWARDS_VAULT.optimismUSDC) as `0x${string}`,
+    morphoPool: (isUSDT ? MORPHO_POOLS['usdt0-supply'] : MORPHO_POOLS['usdce-supply']) as `0x${string}`,
+    liskAsset: (isUSDT ? TokenAddresses.USDT0.lisk : TokenAddresses.USDCe.lisk) as `0x${string}`,
+    opToken: (isUSDT ? TokenAddresses.USDT.optimism : TokenAddresses.USDC.optimism) as `0x${string}`,
   }
 }
 
-async function readErc20Balance(
+async function readErc20Bal(
+  client: typeof liskPublic,
   token: `0x${string}`,
   holder: `0x${string}`,
 ) {
-  return (await liskPublic.readContract({
+  return (await client.readContract({
     address: token,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
@@ -180,18 +153,39 @@ async function readErc20Balance(
   })) as bigint
 }
 
-async function waitForTxLisk(hash: `0x${string}`, confirmations = 2) {
-  await liskPublic.waitForTransactionReceipt({ hash, confirmations })
+function scaleSharesToVault(shares: bigint) {
+  // Convert receipt “shares” decimals -> vault shares decimals (18)
+  if (BigInt(RECEIPT_DECIMALS) === BigInt(VAULT_SHARES_DECIMALS)) return shares
+
+  if (RECEIPT_DECIMALS < VAULT_SHARES_DECIMALS) {
+    const mul = 10n ** (VAULT_SHARES_DECIMALS - RECEIPT_DECIMALS)
+    return shares * mul
+  } else {
+    const div = 10n ** (RECEIPT_DECIMALS - VAULT_SHARES_DECIMALS)
+    return shares / div
+  }
 }
 
-async function waitForTxOp(hash: `0x${string}`, confirmations = 2) {
-  await opPublic.waitForTransactionReceipt({ hash, confirmations })
+async function waitForBalanceAtLeast(
+  client: typeof liskPublic,
+  token: `0x${string}`,
+  holder: `0x${string}`,
+  min: bigint,
+  timeoutMs = 90_000,
+  pollMs = 3_000,
+) {
+  const end = Date.now() + timeoutMs
+  while (Date.now() < end) {
+    const bal = await readErc20Bal(client, token, holder)
+    if (bal >= min) return bal
+    await sleep(pollMs)
+  }
+  throw new Error(`timeout waiting for ${min} of ${token} on ${holder}`)
 }
 
-/* ─────────────── Route (POST) ─────────────── */
+/* ─────────────── Route ─────────────── */
 export async function POST(req: Request) {
   let _refId: string | undefined
-
   try {
     const body = await req.json().catch(() => ({}))
     const refId = body?.refId as `0x${string}` | undefined
@@ -202,53 +196,76 @@ export async function POST(req: Request) {
 
     const lock = await tryLock(refId)
     if (!lock.ok) {
-      console.log('[withdraw/finish] lock miss', {
-        refId,
-        reason: lock.reason,
-        stage: (lock as any).stage,
-      })
-      if (lock.reason === 'Already done') {
-        return json({ ok: true, already: true, stage: (lock as any).stage })
-      }
-      return json(
-        { ok: true, processing: true, reason: lock.reason, stage: (lock as any).stage },
-        202,
-      )
+      console.log('[withdraw/finish] lock miss', { refId, reason: lock.reason, stage: lock.stage })
+      if (lock.reason === 'Already done') return json({ ok: true, already: true, stage: lock.stage })
+      return json({ ok: true, processing: true, reason: lock.reason, stage: lock.stage }, 202)
     }
 
     let row = await prisma.withdrawIntent.findUnique({ where: { refId } })
     if (!row) return bad('Unknown refId', 404)
 
-    // Deadline guard: enforce only before irreversible steps
-    try {
-      const dl = BigInt(row.deadline)
-      if (dl <= BigInt(nowSec()) && row.status === 'PROCESSING') {
-        await prisma.withdrawIntent.update({
-          where: { refId },
-          data: { status: 'FAILED', error: 'Withdraw intent expired before processing' },
-        })
-        return bad('Withdraw intent expired', 401)
-      }
-    } catch {
-      // ignore malformed deadline
-    }
-
-    // Validate row fields
     if (!isAddress(row.user as any) || !isAddress(row.dstToken as any)) {
-      console.warn('[withdraw/finish] invalid addresses on row', {
-        refId,
-        user: row.user,
-        dstToken: row.dstToken,
-      })
+      console.warn('[withdraw/finish] invalid addresses on row', { refId, user: row.user, dstToken: row.dstToken })
       return bad('Row has invalid addresses; recreate intent', 400)
     }
 
-    const user = row.user as `0x${string}`
+    const user = row.user as Address
     const dstToken = row.dstToken as `0x${string}`
-    const amountShares = BigInt(row.amountShares)
-    const minAmountOutOnOp = BigInt(row.minAmountOut)
+    const receiptShares = BigInt(row.amountShares) // OP-side receipt units
+    const minAmountOut = BigInt(row.minAmountOut)
 
     const { rewardsVault, morphoPool, liskAsset, opToken } = pickFamilies(dstToken)
+
+    // Derive vault-share amount (18 decimals)
+    const redeemShares = scaleSharesToVault(receiptShares)
+
+    /* 0) Preflight: make sure redeemShares produces >0 assets, and Safe has shares
+          (Fail BEFORE burn to avoid accounting mismatch) */
+    {
+      const vaultDecimals = BigInt(
+        (await liskPublic.readContract({
+          address: morphoPool,
+          abi: ERC4626_ABI,
+          functionName: 'decimals',
+        })) as number,
+      )
+
+      if (vaultDecimals !== VAULT_SHARES_DECIMALS) {
+        console.warn('[withdraw/finish] vault decimals unexpected', {
+          refId,
+          morphoPool,
+          vaultDecimals: vaultDecimals.toString(),
+          assumed: VAULT_SHARES_DECIMALS.toString(),
+        })
+      }
+
+      const safeShareBal = await readErc20Bal(liskPublic, morphoPool, SAFEVAULT as `0x${string}`)
+      const previewAssets = (await liskPublic.readContract({
+        address: morphoPool,
+        abi: ERC4626_ABI,
+        functionName: 'previewRedeem',
+        args: [redeemShares],
+      })) as bigint
+
+      console.log('[withdraw/finish] preflight', {
+        refId,
+        morphoPool,
+        receiptShares: receiptShares.toString(),
+        redeemShares: redeemShares.toString(),
+        safeShareBal: safeShareBal.toString(),
+        previewAssets: previewAssets.toString(),
+      })
+
+      if (safeShareBal < redeemShares) {
+        throw new Error(`Safe has insufficient vault shares (have=${safeShareBal}, need=${redeemShares})`)
+      }
+      if (previewAssets <= 0n) {
+        throw new Error(
+          `Redeem would produce zero underlying (previewRedeem=0). ` +
+            `Likely dust amount after conversion. receiptShares=${receiptShares} redeemShares=${redeemShares}`,
+        )
+      }
+    }
 
     /* 1) Burn on OP (idempotent) */
     if (!row.burnTxHash) {
@@ -256,55 +273,42 @@ export async function POST(req: Request) {
         refId,
         rewardsVault,
         user,
-        amountShares: amountShares.toString(),
+        amountShares: receiptShares.toString(),
       })
 
       const { request } = await opPublic.simulateContract({
         address: rewardsVault,
         abi: rewardsVaultAbi,
         functionName: 'recordWithdrawal',
-        args: [user, amountShares],
+        args: [user, receiptShares],
         account: relayer,
       })
-
       const burnTx = await opWallet.writeContract(request)
-      await waitForTxOp(burnTx, 2)
+      await opPublic.waitForTransactionReceipt({ hash: burnTx })
 
-      await advanceWithdraw(
-        refId,
-        'PROCESSING' as WithdrawState,
-        'BURNED' as WithdrawState,
-        { burnTxHash: burnTx },
-      )
-
+      await advanceWithdraw(refId, 'PROCESSING', 'BURNED', { burnTxHash: burnTx })
       row = await prisma.withdrawIntent.findUnique({ where: { refId } })
       console.log('[withdraw/finish] burn OK', { refId, burnTx })
     } else {
       console.log('[withdraw/finish] burn already done', { refId, burnTx: row.burnTxHash })
     }
 
-    /* 2) SAFE redeems shares on Lisk (ERC-4626 redeem) */
-    let redeemedAmount: bigint | null = null
-
+    /* 2) SAFE executes redeem on Lisk (ERC4626 redeem) */
     if (!row?.redeemTxHash) {
       console.log('[withdraw/finish] redeem via SAFE → Lisk', {
         refId,
         morphoPool,
-        shares: amountShares.toString(),
+        receiptShares: receiptShares.toString(),
+        redeemShares: redeemShares.toString(),
         receiver: relayer.address,
-        owner: SAFEVAULT,
-        underlying: liskAsset,
       })
+      await advanceWithdraw(refId, 'BURNED', 'REDEEMING')
 
-      await advanceWithdraw(refId, 'BURNED' as WithdrawState, 'REDEEMING' as WithdrawState)
-
-      // Balance delta method (robust even if redeem() return value isn't easily decoded from Safe exec)
-      const beforeBal = await readErc20Balance(liskAsset, relayer.address as `0x${string}`)
-
+      // Redeem to relayer (so relayer can bridge)
       const calldata = encodeFunctionData({
         abi: ERC4626_ABI,
         functionName: 'redeem',
-        args: [amountShares, relayer.address, SAFEVAULT],
+        args: [redeemShares, relayer.address as `0x${string}`, SAFEVAULT as `0x${string}`],
       })
 
       const protocolKit = await Safe.init({
@@ -323,103 +327,75 @@ export async function POST(req: Request) {
       const safeTx = await protocolKit.createTransaction({ transactions: [tx] })
       const signed = await protocolKit.signTransaction(safeTx)
       const execRes = await protocolKit.executeTransaction(signed)
-
       const redeemTxHash =
-        (execRes as any)?.hash ??
-        (execRes as any)?.transactionResponse?.hash ??
-        null
+        (execRes as any)?.hash ?? (execRes as any)?.transactionResponse?.hash ?? null
 
       if (!redeemTxHash) throw new Error('Safe redeem tx hash not found')
 
-      // Wait a bit for finality / balance update
-      await waitForTxLisk(redeemTxHash as `0x${string}`, 2)
-
-      const afterBal = await readErc20Balance(liskAsset, relayer.address as `0x${string}`)
-      redeemedAmount = afterBal - beforeBal
-
-      if (redeemedAmount <= 0n) {
-        throw new Error(`Redeem produced zero underlying (before=${beforeBal}, after=${afterBal})`)
+      // Ensure it actually succeeded on-chain
+      const receipt = await liskPublic.waitForTransactionReceipt({ hash: redeemTxHash as `0x${string}` })
+      const status = (receipt as any)?.status
+      if (status === 'reverted' || status === 0n || status === 0) {
+        throw new Error(`Safe redeem reverted. tx=${redeemTxHash}`)
       }
 
-      await advanceWithdraw(refId, 'REDEEMING' as WithdrawState, 'REDEEMED' as WithdrawState, {
-        redeemTxHash,
-        // optional: persist redeemed amount (string) if your Prisma model has a field for it
-        // redeemedAmount: redeemedAmount.toString(),
-      })
-
+      await advanceWithdraw(refId, 'REDEEMING', 'REDEEMED', { redeemTxHash })
       row = await prisma.withdrawIntent.findUnique({ where: { refId } })
-      console.log('[withdraw/finish] redeem OK', { refId, redeemTxHash, redeemedAmount: redeemedAmount.toString() })
+      console.log('[withdraw/finish] redeem OK', { refId, redeemTxHash })
     } else {
       console.log('[withdraw/finish] redeem already done', { refId, redeemTx: row?.redeemTxHash })
     }
 
-    // If we didn't compute redeemedAmount in this call (because redeem already happened),
-    // estimate it as the relayer’s current balance of the underlying.
-    // NOTE: This assumes relayer keeps near-zero balance of that underlying between runs.
-    if (redeemedAmount === null) {
-      const bal = await readErc20Balance(liskAsset, relayer.address as `0x${string}`)
-      if (bal <= 0n) {
-        throw new Error('No Lisk underlying balance found to bridge (relayer balance is zero)')
-      }
-      redeemedAmount = bal
-    }
-
-    /* 3) Bridge on LI.FI from Lisk -> OP to user (server-side) */
+    /* 3) Bridge on LI.FI from Lisk -> OP to user */
     ensureLifiServer()
+
+    console.log('[withdraw/finish] wait Lisk balance ≥ minAmountOut', {
+      refId,
+      token: liskAsset,
+      holder: relayer.address,
+      min: minAmountOut.toString(),
+    })
+    await waitForBalanceAtLeast(liskPublic, liskAsset, relayer.address as `0x${string}`, minAmountOut)
 
     if (!row?.fromTxHash || !row?.toTxHash || !row?.amountOut) {
       console.log('[withdraw/finish] bridging with Li.Fi', {
         refId,
         fromToken: liskAsset,
         toToken: opToken,
-        fromAmount: redeemedAmount.toString(),
-        minAmountOutOnOp: minAmountOutOnOp.toString(),
+        fromAmount: minAmountOut.toString(),
         user,
       })
+      await advanceWithdraw(refId, 'REDEEMED', 'BRIDGING')
 
-      await advanceWithdraw(refId, 'REDEEMED' as WithdrawState, 'BRIDGING' as WithdrawState)
-
-      // Quote using the REAL fromAmount on Lisk
       const quote = await getQuote({
         fromChain: lisk.id,
         toChain: optimism.id,
         fromToken: liskAsset,
         toToken: opToken,
-        fromAmount: redeemedAmount.toString(),
+        fromAmount: minAmountOut.toString(),
         fromAddress: relayer.address,
         toAddress: user,
         slippage: 0.003,
       })
-
-      // Enforce minAmountOut using LI.FI's minimum-to-receive estimate
-      const quotedMinToAmount = BigInt(quote.estimate?.toAmountMin ?? '0')
-      if (quotedMinToAmount < minAmountOutOnOp) {
-        throw new Error(
-          `Quoted min on OP ${quotedMinToAmount} < minAmountOut ${minAmountOutOnOp}`,
-        )
-      }
-
       const route = convertQuoteToRoute(quote)
 
       let seenFrom: `0x${string}` | undefined
       let seenTo: `0x${string}` | undefined
 
-      const executed = await executeRoute(route, {
+      await executeRoute(route, {
         updateRouteHook: async (rt) => {
-          try {
-            for (const step of rt.steps ?? []) {
-              for (const p of step.execution?.process ?? []) {
-                if (!p?.txHash) continue
-                if (!seenFrom && (p.status === 'PENDING' || p.status === 'DONE')) {
+          for (const step of rt.steps ?? []) {
+            for (const p of step.execution?.process ?? []) {
+              if (p.txHash) {
+                if (!seenFrom && (p.status === 'DONE' || p.status === 'PENDING')) {
                   seenFrom = p.txHash as `0x${string}`
                 }
-                // best-effort: capture a DONE hash later in the pipeline
-                if (p.status === 'DONE') {
+                if (p.status === 'DONE' && (['SWAP', 'CROSS_CHAIN', 'BRIDGE'] as const).includes(step.type as any)) {
                   seenTo = p.txHash as `0x${string}`
                 }
               }
             }
-          } catch {}
+          }
         },
         switchChainHook: async (chainId) => {
           if (chainId === lisk.id) return liskWallet
@@ -429,24 +405,20 @@ export async function POST(req: Request) {
         acceptExchangeRateUpdateHook: async () => true,
       })
 
-      const finalToAmount = BigInt((executed as any)?.toAmount ?? quote.estimate?.toAmountMin ?? '0')
-      if (finalToAmount < minAmountOutOnOp) {
-        throw new Error(`Final OP amount ${finalToAmount} < minAmountOut ${minAmountOutOnOp}`)
-      }
+      const amountOut = route.toAmount ?? String(minAmountOut)
 
-      await advanceWithdraw(refId, 'BRIDGING' as WithdrawState, 'SUCCESS' as WithdrawState, {
-        fromTxHash: seenFrom ?? null,
-        toTxHash: seenTo ?? null,
-        amountOut: finalToAmount.toString(),
+      await advanceWithdraw(refId, 'BRIDGING', 'SUCCESS', {
+        fromTxHash: seenFrom ?? row?.fromTxHash ?? null,
+        toTxHash: seenTo ?? row?.toTxHash ?? null,
+        amountOut,
       })
-
       row = await prisma.withdrawIntent.findUnique({ where: { refId } })
 
       console.log('[withdraw/finish] bridge OK', {
         refId,
         fromTx: row?.fromTxHash,
         toTx: row?.toTxHash,
-        amountOut: row?.amountOut,
+        amountOut,
       })
     } else {
       console.log('[withdraw/finish] bridge already recorded', {
@@ -461,8 +433,6 @@ export async function POST(req: Request) {
     return json({ ok: true, refId, status: row?.status })
   } catch (e: any) {
     console.error('[withdraw/finish] failed:', e?.message || e)
-
-    // best-effort failure update
     try {
       if (_refId) {
         const cur = await prisma.withdrawIntent.findUnique({ where: { refId: _refId } })
@@ -474,32 +444,6 @@ export async function POST(req: Request) {
         }
       }
     } catch {}
-
-    return NextResponse.json(
-      { ok: false, error: e?.message || 'withdraw/finish failed' },
-      { status: 500 },
-    )
+    return NextResponse.json({ ok: false, error: e?.message || 'withdraw/finish failed' }, { status: 500 })
   }
-}
-
-/* ─────────────── Route (GET status) ─────────────── */
-export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url)
-  const refId = (searchParams.get('refId') || '') as `0x${string}`
-  if (!refId) return NextResponse.json({ ok: false, error: 'refId required' }, { status: 400 })
-
-  const row = await prisma.withdrawIntent.findUnique({ where: { refId } })
-  if (!row) return NextResponse.json({ ok: false, error: 'not found' }, { status: 404 })
-
-  return NextResponse.json({
-    ok: true,
-    refId: row.refId,
-    status: row.status,
-    redeemTxHash: row.redeemTxHash,
-    fromTxHash: row.fromTxHash,
-    toTxHash: row.toTxHash,
-    amountOut: row.amountOut,
-    burnTxHash: row.burnTxHash,
-    updatedAt: row.updatedAt,
-  })
 }
