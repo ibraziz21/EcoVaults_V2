@@ -5,25 +5,16 @@ import React, { useMemo, useState } from "react";
 import ClaimRewardTable from ".";
 import { ClaimableRewardColumns, type ClaimableReward } from "./columns";
 
-import { useAccount, useConnect } from "wagmi";
-import { useWalletClient, useSwitchChain, useChainId } from "wagmi";
+import { useAccount, useConnect, useWalletClient, useSwitchChain, useChainId } from "wagmi";
 import { optimism } from "viem/chains";
 import type { Address } from "viem";
 import { formatUnits } from "viem";
-import { Button } from "@/components/ui/button";
 import { Loader2 } from "lucide-react";
 
 import { useVaultRewards, type DualRewardsData } from "@/hooks/useVaultRewards";
 import rewardsAbi from "@/lib/abi/rewardsAbi.json";
 import { useUsdPrices } from "@/hooks/useUSDPrices";
 import { ClaimRewardsModal } from "@/components/claim-rewards-modal";
-
-function formatNumber(n: number, maxFrac = 6) {
-  return n.toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: maxFrac,
-  });
-}
 
 type RowRaw = {
   symbol: "USDC" | "USDT";
@@ -32,42 +23,32 @@ type RowRaw = {
 };
 
 const ClaimRewards: React.FC = () => {
+  const { address: accountAddress, isConnected } = useAccount();
+  const { connect, connectors } = useConnect();
 
-
-  const { connect, connectors } = useConnect()
-  
   function openConnect() {
-    // Prefer Safe when in Safe, otherwise injected, otherwise first available
-    const safeConn = connectors.find((c) => c.id === 'safe')
-    const injectedConn = connectors.find((c) => c.id === 'injected')
-    const connector = safeConn ?? injectedConn ?? connectors[0]
-  
-    if (!connector) throw new Error('No wallet connectors available')
-    connect({ connector })
+    const safeConn = connectors.find((c) => c.id === "safe");
+    const injectedConn = connectors.find((c) => c.id === "injected");
+    const connector = safeConn ?? injectedConn ?? connectors[0];
+    if (!connector) throw new Error("No wallet connectors available");
+    connect({ connector });
   }
+
   const { data: wallet, refetch: refetchWalletClient } = useWalletClient();
   const { switchChainAsync } = useSwitchChain();
   const activeChainId = useChainId();
 
-  const {
-    data: dualRewards,
-    isLoading,
-    refetch,
-    user,
-  } = useVaultRewards();
-
+  const { data: dualRewards, isLoading, refetch, user } = useVaultRewards();
   const { priceUsdForSymbol } = useUsdPrices();
 
   const [claimingKey, setClaimingKey] = useState<string | null>(null);
-
   const [showModal, setShowModal] = useState(false);
   const [selectedReward, setSelectedReward] = useState<
     (ClaimableReward & { __raw?: RowRaw }) | null
   >(null);
 
-  // ────────────────────────────────────────────────────────────────
-  // Build table rows from DualRewardsData
-  // ────────────────────────────────────────────────────────────────
+  const userAddr = (user ?? accountAddress) as Address | undefined;
+
   const tableData: (ClaimableReward & { __raw: RowRaw })[] = useMemo(() => {
     if (!dualRewards) return [];
 
@@ -78,45 +59,34 @@ const ClaimRewards: React.FC = () => {
       tokenData: DualRewardsData["byToken"]["USDC" | "USDT"]
     ) => {
       const earned = tokenData.earned ?? 0n;
-      const human = Number(formatUnits(earned, 6)); // both USDC/USDT are 6d
+      const human = Number(formatUnits(earned, 6)); // USDC/USDT assumed 6 decimals
 
       rows.push({
         network: "OP Mainnet",
         source: "Morpho Blue",
         claimable: human.toString(),
         token: symbol,
-        __raw: {
-          symbol,
-          vault: tokenData.vault,
-          earned,
-        },
+        __raw: { symbol, vault: tokenData.vault, earned },
       });
     };
 
-    if (dualRewards.byToken.USDC) {
-      pushRow("USDC", dualRewards.byToken.USDC);
-    }
-    if (dualRewards.byToken.USDT) {
-      pushRow("USDT", dualRewards.byToken.USDT);
-    }
+    if (dualRewards.byToken.USDC) pushRow("USDC", dualRewards.byToken.USDC);
+    if (dualRewards.byToken.USDT) pushRow("USDT", dualRewards.byToken.USDT);
 
     return rows;
   }, [dualRewards]);
 
   function onClaimClick(row: ClaimableReward & { __raw?: RowRaw }) {
-    if (!wallet || !user) return openConnect?.();
+    if (!isConnected || !wallet || !userAddr) return openConnect();
     setSelectedReward(row);
     setShowModal(true);
   }
 
-  // ────────────────────────────────────────────────────────────────
-  // Claim from a single rewards vault (per token)
-  // ────────────────────────────────────────────────────────────────
   async function handleModalClaim() {
-    if (!wallet || !user || !selectedReward) return;
+    if (!wallet || !userAddr || !selectedReward) return;
 
     const item = selectedReward.__raw!;
-    const { vault, symbol } = item;
+    const { vault } = item;
 
     try {
       const key = vault.toLowerCase();
@@ -124,25 +94,20 @@ const ClaimRewards: React.FC = () => {
 
       // ensure Optimism
       let signer = wallet;
-
       if (activeChainId !== optimism.id && switchChainAsync) {
         await switchChainAsync({ chainId: optimism.id });
         const refreshed = (await refetchWalletClient()).data;
         if (refreshed) signer = refreshed;
       }
+      if (!signer) throw new Error("No wallet client available after chain switch");
 
-      if (!signer) {
-        throw new Error("No wallet client available after chain switch");
-      }
-
-      // NOTE: assumes rewardsAbi has a `getReward(address)` or similar.
-      // If your function name/args differ, adjust here.
+      // ✅ ABI has claimRewards() / claimRewardsUpToAvailable() (no args)
       await signer.writeContract({
         address: vault,
         abi: rewardsAbi as any,
-        functionName: "getReward", // 🔁 change if your ABI uses another name
-        args: [user as Address],
-        account: user as Address,
+        functionName: "claimRewardsUpToAvailable", // or "claimRewards"
+        args: [],
+        account: signer.account, // Safe connector: this is the Safe address
       });
 
       await refetch();
@@ -174,8 +139,7 @@ const ClaimRewards: React.FC = () => {
             priceUsdForSymbol,
             isClaiming: (r: any) => {
               const raw = (r as any).__raw as RowRaw | undefined;
-              if (!raw) return false;
-              return claimingKey === raw.vault.toLowerCase();
+              return !!raw && claimingKey === raw.vault.toLowerCase();
             },
           }}
           emptyMessage="No rewards to claim yet."
@@ -190,9 +154,7 @@ const ClaimRewards: React.FC = () => {
             setShowModal(false);
             setSelectedReward(null);
           }}
-          onClaim={async () => {
-            await handleModalClaim();
-          }}
+          onClaim={handleModalClaim}
           rewards={[
             {
               token: selectedReward.token,
