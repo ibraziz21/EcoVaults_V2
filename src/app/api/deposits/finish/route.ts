@@ -501,8 +501,8 @@ export async function POST(req: Request) {
       if (verified.token.toLowerCase() !== liskToken.toLowerCase()) {
         throw new Error('Deposit token mismatch (must match Lisk asset)')
       }
-      if (verified.amount !== amt) {
-        throw new Error(`Deposit amount mismatch: ${verified.amount} != ${amt}`)
+      if (verified.assetsDeposited !== amt) {
+        throw new Error(`Deposit amount mismatch: ${verified.assetsDeposited} != ${amt}`)
       }
 
       await advanceIdempotent(refId, 'DEPOSITING', 'DEPOSITED', {
