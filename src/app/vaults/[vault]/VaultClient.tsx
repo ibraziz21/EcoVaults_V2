@@ -323,7 +323,11 @@ export default function VaultDetailPage() {
                       <p className="text-[20px] font-semibold">
                         $
                         {vaultVariants
-                          .reduce((sum, v) => sum + Number((v.tvl || '0').toString().replace(/,/g, '')), 0)
+                          .reduce((sum, v) => {
+                            const raw = v.tvl ?? 0
+                            const n = Number(String(raw).toString().replace(/,/g, ''))
+                            return sum + (Number.isFinite(n) ? n : 0)
+                          }, 0)
                           .toLocaleString()}
                       </p>
                     </CardContent>
