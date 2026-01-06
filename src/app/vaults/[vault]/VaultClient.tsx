@@ -325,8 +325,24 @@ export default function VaultDetailPage() {
                         {vaultVariants
                           .reduce((sum, v) => {
                             const raw = v.tvl ?? 0
-                            const n = Number(String(raw).toString().replace(/,/g, ''))
-                            return sum + (Number.isFinite(n) ? n : 0)
+                            const s = String(raw ?? '').trim()
+
+                            const euPattern = /^\d{1,3}(\.\d{3})+(,\d+)?$/ // 1.234.567,89
+                            const usPattern = /^\d{1,3}(,\d{3})+(\.\d+)?$/ // 1,234,567.89
+
+                            let parsed = 0
+                            if (euPattern.test(s)) {
+                              const n = Number(s.replace(/\./g, '').replace(',', '.'))
+                              parsed = Number.isFinite(n) ? n : 0
+                            } else if (usPattern.test(s)) {
+                              const n = Number(s.replace(/,/g, ''))
+                              parsed = Number.isFinite(n) ? n : 0
+                            } else {
+                              const fallback = Number(s.replace(/,/g, '.').replace(/[^\d.]/g, ''))
+                              parsed = Number.isFinite(fallback) ? fallback : 0
+                            }
+
+                            return sum + parsed
                           }, 0)
                           .toLocaleString()}
                       </p>
