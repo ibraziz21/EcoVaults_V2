@@ -163,35 +163,44 @@ export const ReviewWithdrawModal: FC<Props> = ({
   user,
 }) => {
   const { data: walletClient } = useWalletClient()
-  const { connect, connectors } = useConnect()
+  const { connect, connectAsync, connectors } = useConnect()
 
-  function openConnect() {
+  async function openConnect() {
     const isSafeEnv = typeof window !== 'undefined' && window.parent !== window
     const safeConn = connectors.find((c) => c.id === 'safe')
     const injectedConn = connectors.find((c) => c.id === 'injected')
     const fallback = connectors[0]
 
     if (isSafeEnv && safeConn) {
-      connect({ connector: safeConn }).catch((err) => {
+      try {
+        await connectAsync({ connector: safeConn })
+        return
+      } catch (err) {
         console.warn('[connect] Safe connector failed, falling back to injected', err)
-        if (injectedConn) connect({ connector: injectedConn })
-        else if (fallback) connect({ connector: fallback })
-      })
+        if (injectedConn) {
+          await connectAsync({ connector: injectedConn }).catch(() => {})
+          return
+        }
+        if (fallback) {
+          await connectAsync({ connector: fallback }).catch(() => {})
+          return
+        }
+      }
       return
     }
 
     if (injectedConn) {
-      connect({ connector: injectedConn })
+      await connectAsync({ connector: injectedConn }).catch(() => {})
       return
     }
 
     if (safeConn) {
-      connect({ connector: safeConn })
+      await connectAsync({ connector: safeConn }).catch(() => {})
       return
     }
 
     if (!fallback) throw new Error('No wallet connectors available')
-    connect({ connector: fallback })
+    await connectAsync({ connector: fallback }).catch(() => {})
   }
 
   const [step, setStep] = useState<FlowStep>('idle')
