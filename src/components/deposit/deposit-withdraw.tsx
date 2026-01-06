@@ -168,6 +168,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
       void queryClient.invalidateQueries({ queryKey: ['positions'] });
     }
     setBalanceRefreshTick((x) => x + 1);
+    setAmount('');
     setWithdrawSuccessData(data);
     setShowWithdrawReview(false);
     setTimeout(() => setShowWithdrawSuccess(true), 300);
@@ -515,6 +516,14 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
     parsedAmountUnits !== null &&
     parsedAmountUnits > availableBalanceBigint;
 
+  const withdrawExceedsBalance = useMemo(() => {
+    if (activeTab !== 'withdraw') return false;
+    if (!withdrawPosition) return false;
+    const entered = parsedAmountUnits ?? 0n;
+    const available = withdrawPosition.amount ?? 0n;
+    return entered > available;
+  }, [activeTab, parsedAmountUnits, withdrawPosition]);
+
   const bridgeFeeDisplay = useMemo(() => {
     if (!amount || Number(amount) <= 0) return 0;
     if (fee === 0n) return 0.0025;
@@ -594,6 +603,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
     Boolean(quoteError) ||
     !snap ||
     exceedsBalance ||
+    withdrawExceedsBalance ||
     (activeTab === 'deposit' && !canProceedWithDeposit);
 
   const formatMaxFromBigint = (bal: bigint | null | undefined) => {
@@ -741,6 +751,11 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
               {exceedsBalance && (
                 <div className="mt-1 text-xs text-red-600">
                   Amount exceeds available balance.
+                </div>
+              )}
+              {withdrawExceedsBalance && (
+                <div className="mt-1 text-xs text-red-600">
+                  Amount exceeds withdrawable balance.
                 </div>
               )}
 
