@@ -1,6 +1,8 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { useRouter } from "next/navigation"
+import { useQueryClient } from "@tanstack/react-query"
 import { Check, AlertCircle, Sparkles } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import Image from "next/image"
@@ -63,6 +65,8 @@ export function ClaimRewardsModal({
   onClaim,
   rewards: initialRewards,
 }: ClaimRewardsModalProps) {
+  const router = useRouter()
+  const queryClient = useQueryClient()
   const [state, setState] = useState<ModalState>("initial")
   const [rewards, setRewards] = useState<Reward[]>(initialRewards || DEFAULT_REWARDS)
 
@@ -85,6 +89,8 @@ export function ClaimRewardsModal({
     0,
   )
   const allSelected = rewards.every((r) => r.checked)
+  const totalTokenAmount = selectedRewards.reduce((sum, r) => sum + r.amount, 0)
+  const nothingToClaim = totalTokenAmount < 0.01
 
   const handleToggleReward = (token: string) => {
     setRewards((prev) =>
@@ -97,6 +103,7 @@ export function ClaimRewardsModal({
   }
 
   const handleClaim = async () => {
+    if (nothingToClaim || selectedRewards.length === 0) return
     try {
       setState("signing")
       await new Promise((resolve) => setTimeout(resolve, 1000))
@@ -108,6 +115,7 @@ export function ClaimRewardsModal({
         await new Promise((resolve) => setTimeout(resolve, 1500))
       }
 
+      void queryClient.invalidateQueries({ queryKey: ["vault-rewards-v2"] })
       setState("success")
     } catch (error) {
       setState("error")
@@ -120,7 +128,7 @@ export function ClaimRewardsModal({
 
   const handleExploreVaults = () => {
     onClose()
-    // Navigate to vaults page
+    router.push("/vaults")
   }
 
   const handleBackToDashboard = () => {
@@ -357,7 +365,19 @@ export function ClaimRewardsModal({
                 className="text-red-600 dark:text-red-400 flex-shrink-0 mt-0.5"
               />
               <span className="text-xs text-red-600 dark:text-red-400">
-                Claim failed. Please try again.
+                {nothingToClaim ? "No claimable rewards right now." : "Claim failed. Please try again."}
+              </span>
+            </div>
+          )}
+
+          {nothingToClaim && (
+            <div className="flex items-start gap-2 p-3 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg">
+              <AlertCircle
+                size={16}
+                className="text-blue-700 dark:text-blue-300 flex-shrink-0 mt-0.5"
+              />
+              <span className="text-xs text-blue-700 dark:text-blue-300">
+                No claimable USDC or USDT rewards yet. Keep your positions active to accrue rewards.
               </span>
             </div>
           )}
@@ -367,6 +387,7 @@ export function ClaimRewardsModal({
             onClick={state === "error" ? handleTryAgain : handleClaim}
             disabled={
               selectedRewards.length === 0 ||
+              nothingToClaim ||
               state === "claiming" ||
               state === "signing"
             }

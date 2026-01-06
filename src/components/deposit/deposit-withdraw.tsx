@@ -155,6 +155,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
       void queryClient.invalidateQueries({ queryKey: ['positions'] });
     }
     setBalanceRefreshTick((x) => x + 1);
+    setAmount('');
     setDepositSuccessData(data);
     setShowReview(false);
     setTimeout(() => setShowDepositSuccess(true), 300);
@@ -490,6 +491,30 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
 
   const amountNum = Number.parseFloat(amount) || 0;
 
+  const availableBalanceBigint = useMemo(() => {
+    if (selectedToken.id === 'usdc') return opUsdcBal ?? 0n;
+    if (selectedToken.id === 'usdt') return opUsdtBal ?? 0n;
+    if (selectedToken.id === 'usdt0_op') {
+      const raw = availableTokenBalances.USDT0_OP;
+      if (!Number.isFinite(raw) || raw <= 0) return 0n;
+      return BigInt(Math.floor(raw * 1e6)); // USDT0_OP stored as number (6d)
+    }
+    return 0n;
+  }, [selectedToken.id, opUsdcBal, opUsdtBal, availableTokenBalances.USDT0_OP]);
+
+  const parsedAmountUnits = useMemo(() => {
+    try {
+      return parseUnits(amount || '0', tokenDecimals);
+    } catch {
+      return null;
+    }
+  }, [amount, tokenDecimals]);
+
+  const exceedsBalance =
+    activeTab === 'deposit' &&
+    parsedAmountUnits !== null &&
+    parsedAmountUnits > availableBalanceBigint;
+
   const bridgeFeeDisplay = useMemo(() => {
     if (!amount || Number(amount) <= 0) return 0;
     if (fee === 0n) return 0.0025;
@@ -568,7 +593,34 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
     !(amountNum > 0) ||
     Boolean(quoteError) ||
     !snap ||
+    exceedsBalance ||
     (activeTab === 'deposit' && !canProceedWithDeposit);
+
+  const formatMaxFromBigint = (bal: bigint | null | undefined) => {
+    if (!bal || bal <= 0n) return '';
+    const whole = bal / 1_000_000n;
+    const frac = bal % 1_000_000n;
+    if (frac === 0n) return whole.toString();
+    const fracStr = frac.toString().padStart(6, '0').replace(/0+$/, '');
+    return fracStr ? `${whole}.${fracStr}` : whole.toString();
+  };
+
+  const maxDepositAmountStr = useMemo(() => {
+    switch (selectedToken.id) {
+      case 'usdc':
+        return formatMaxFromBigint(opUsdcBal);
+      case 'usdt':
+        return formatMaxFromBigint(opUsdtBal);
+      case 'usdt0_op': {
+        const raw = availableTokenBalances.USDT0_OP;
+        if (!Number.isFinite(raw) || raw <= 0) return '';
+        const floored = Math.floor(raw * 1e6) / 1e6;
+        return floored.toString();
+      }
+      default:
+        return '';
+    }
+  }, [selectedToken.id, opUsdcBal, opUsdtBal, availableTokenBalances.USDT0_OP]);
 
   const onDepositClick = () => {
     if (confirmDisabled || activeTab !== 'deposit') return;
@@ -648,26 +700,24 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
                 onClick={() => {
                   if (activeTab === 'withdraw') {
                     const raw = Number(withdrawBalanceHuman.replace(/,/g, '')) || 0;
-                    if (raw <= 0) {
-                      setAmount('');
-                      return;
-                    }
-                    const factor = 1e6; // receipt decimals = 6
-                    const floored = Math.floor(raw * factor) / factor;
-                    setAmount(floored.toString());
-                  } else {
-                    const raw = depositWalletBalance;
-                    if (!Number.isFinite(raw) || raw <= 0) {
-                      setAmount('');
-                      return;
-                    }
-                    const factor = 1e6;
-                    const floored = Math.floor(raw * factor) / factor;
-                    setAmount(floored.toString());
+                  if (raw <= 0) {
+                    setAmount('');
+                    return;
                   }
-                }}
-                className=" cursor-pointer text-xs font-semibold text-blue-600 hover:text-blue-700 px-2 py-1 rounded-md hover:bg-blue-50 transition-colors"
-              >
+                  const factor = 1e6; // receipt decimals = 6
+                  const floored = Math.floor(raw * factor) / factor;
+                  setAmount(floored.toString());
+                } else {
+                  const maxStr = maxDepositAmountStr;
+                  if (!maxStr) {
+                    setAmount('');
+                    return;
+                  }
+                  setAmount(maxStr);
+                }
+              }}
+              className=" cursor-pointer text-xs font-semibold text-blue-600 hover:text-blue-700 px-2 py-1 rounded-md hover:bg-blue-50 transition-colors"
+            >
                 MAX
               </button>
             </div>
@@ -678,7 +728,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
             <div className="flex items-center justify-between gap-4">
               <div className="flex-1">
                 <input
-                  type="number"
+                  type="text"
                   value={amount}
                   onChange={(e) => setAmount(e.target.value)}
                   placeholder="0.00"
@@ -688,6 +738,11 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
                   ${(Number.parseFloat(amount || '0') * 1).toFixed(2)}
                 </div>
               </div>
+              {exceedsBalance && (
+                <div className="mt-1 text-xs text-red-600">
+                  Amount exceeds available balance.
+                </div>
+              )}
 
               {activeTab === 'deposit' ? (
                 <button
