@@ -12,6 +12,7 @@ import { DepositModal } from './DepositModal/review-deposit-modal';
 import { ReviewWithdrawModal } from '../WithdrawModal/review-withdraw-modal';
 import logolifi from '@/public/lifi.png';
 import { useWalletClient } from 'wagmi';
+import { useQueryClient } from '@tanstack/react-query';
 import { parseUnits } from 'viem';
 
 import type { YieldSnapshot } from '@/hooks/useYields';
@@ -75,6 +76,7 @@ function uiTokenLabel(t: string): string {
 }
 
 export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdrawProps) {
+  const queryClient = useQueryClient();
   const { data: walletClient } = useWalletClient();
 
   const [activeTab, setActiveTab] = useState<'deposit' | 'withdraw'>(initialTab);
@@ -137,6 +139,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
 
   // Route & fees expanded state
   const [routeExpanded, setRouteExpanded] = useState(false);
+  const [balanceRefreshTick, setBalanceRefreshTick] = useState(0);
 
   // Success modals
   const [showDepositSuccess, setShowDepositSuccess] = useState(false);
@@ -146,12 +149,24 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
   const [withdrawSuccessData, setWithdrawSuccessData] = useState<any>(null);
 
   const handleDepositSuccess = (data: any) => {
+    if (walletClient?.account?.address) {
+      void queryClient.invalidateQueries({ queryKey: ['positions', walletClient.account.address] });
+    } else {
+      void queryClient.invalidateQueries({ queryKey: ['positions'] });
+    }
+    setBalanceRefreshTick((x) => x + 1);
     setDepositSuccessData(data);
     setShowReview(false);
     setTimeout(() => setShowDepositSuccess(true), 300);
   };
 
   const handleWithdrawSuccess = (data: any) => {
+    if (walletClient?.account?.address) {
+      void queryClient.invalidateQueries({ queryKey: ['positions', walletClient.account.address] });
+    } else {
+      void queryClient.invalidateQueries({ queryKey: ['positions'] });
+    }
+    setBalanceRefreshTick((x) => x + 1);
     setWithdrawSuccessData(data);
     setShowWithdrawReview(false);
     setTimeout(() => setShowWithdrawSuccess(true), 300);
@@ -267,7 +282,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
         });
       }
     })();
-  }, [walletClient]);
+  }, [walletClient, balanceRefreshTick]);
 
   useEffect(() => {
     if (showWithdrawReview && walletClient?.account?.address) {
@@ -330,7 +345,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
       setOpUsdcBal(_opUsdc ?? null);
       setOpUsdtBal(_opUsdt ?? null);
     });
-  }, [walletClient, snap, isUsdtFamily]);
+  }, [walletClient, snap, isUsdtFamily, balanceRefreshTick]);
 
   // Quote logic – deposits always from OP now (debounced + cancellable)
   useEffect(() => {

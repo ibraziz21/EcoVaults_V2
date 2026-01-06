@@ -337,6 +337,9 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
   /* Full confirm flow (Safe-first wagmi)                                        */
   /* -------------------------------------------------------------------------- */
   const handleConfirm = useCallback(async () => {
+    // Show progress immediately so the stepper reflects work while signing
+    setStep('bridging')
+
     // 0) Ensure connected (Safe first)
     await ensureConnected(isConnected, connectors, connectAsync)
 
@@ -365,7 +368,6 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       setCurrentRefId(refId)
 
       // 3) Fresh quote for minAmount (tolerate by small buffer)
-      setStep('bridging')
       const quote = await getBridgeQuote({
         token: destTokenLabel,
         amount: inputAmt,
