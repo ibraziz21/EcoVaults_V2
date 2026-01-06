@@ -703,7 +703,11 @@ export const ReviewWithdrawModal: FC<Props> = ({
               </div>
             </div>
 
-            {err && <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3 mt-2">{err}</div>}
+            {err && (
+              <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3 mt-2 max-h-24 overflow-y-auto">
+                {err}
+              </div>
+            )}
           </div>
 
           {/* Action button */}

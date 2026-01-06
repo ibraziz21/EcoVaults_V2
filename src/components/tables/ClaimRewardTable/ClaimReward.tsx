@@ -17,10 +17,16 @@ import { useUsdPrices } from "@/hooks/useUSDPrices";
 import { ClaimRewardsModal } from "@/components/claim-rewards-modal";
 
 type RowRaw = {
-  symbol: "USDC" | "USDT";
-  vault: `0x${string}`;
-  earned: bigint;
+  rewards: Array<{
+    symbol: "USDC" | "USDT";
+    vault: `0x${string}`;
+    earned: bigint;
+    usd: number;
+  }>;
+  usdTotal: number;
 };
+
+const MIN_DISPLAY_AMOUNT = 0.01; // anything below this is treated as zero / hidden
 
 const ClaimRewards: React.FC = () => {
   const { address: accountAddress, isConnected } = useAccount();
@@ -52,29 +58,34 @@ const ClaimRewards: React.FC = () => {
   const tableData: (ClaimableReward & { __raw: RowRaw })[] = useMemo(() => {
     if (!dualRewards) return [];
 
-    const rows: (ClaimableReward & { __raw: RowRaw })[] = [];
+    const rewards: RowRaw["rewards"] = [];
 
-    const pushRow = (
+    const pushReward = (
       symbol: "USDC" | "USDT",
       tokenData: DualRewardsData["byToken"]["USDC" | "USDT"]
     ) => {
       const earned = tokenData.earned ?? 0n;
       const human = Number(formatUnits(earned, 6)); // USDC/USDT assumed 6 decimals
-
-      rows.push({
-        network: "OP Mainnet",
-        source: "Morpho Blue",
-        claimable: human.toString(),
-        token: symbol,
-        __raw: { symbol, vault: tokenData.vault, earned },
-      });
+      if (human < MIN_DISPLAY_AMOUNT) return;
+      rewards.push({ symbol, vault: tokenData.vault, earned, usd: human * priceUsdForSymbol(symbol) });
     };
 
-    if (dualRewards.byToken.USDC) pushRow("USDC", dualRewards.byToken.USDC);
-    if (dualRewards.byToken.USDT) pushRow("USDT", dualRewards.byToken.USDT);
+    if (dualRewards.byToken.USDC) pushReward("USDC", dualRewards.byToken.USDC);
+    if (dualRewards.byToken.USDT) pushReward("USDT", dualRewards.byToken.USDT);
 
-    return rows;
-  }, [dualRewards]);
+    const usdTotal = rewards.reduce((s, r) => s + r.usd, 0);
+    if (rewards.length === 0 || usdTotal < MIN_DISPLAY_AMOUNT) return [];
+
+    return [
+      {
+        network: "OP Mainnet",
+        source: "Morpho Blue",
+        claimable: usdTotal.toFixed(2), // USD total
+        token: "USDC & USDT",
+        __raw: { rewards, usdTotal },
+      },
+    ];
+  }, [dualRewards, priceUsdForSymbol]);
 
   function onClaimClick(row: ClaimableReward & { __raw?: RowRaw }) {
     if (!isConnected || !wallet || !userAddr) return openConnect();
@@ -86,10 +97,11 @@ const ClaimRewards: React.FC = () => {
     if (!wallet || !userAddr || !selectedReward) return;
 
     const item = selectedReward.__raw!;
-    const { vault } = item;
+    const rewards = item.rewards ?? [];
+    if (rewards.length === 0) return;
 
     try {
-      const key = vault.toLowerCase();
+      const key = rewards[0].vault.toLowerCase();
       setClaimingKey(key);
 
       // ensure Optimism
@@ -102,13 +114,15 @@ const ClaimRewards: React.FC = () => {
       if (!signer) throw new Error("No wallet client available after chain switch");
 
       // ✅ ABI has claimRewards() / claimRewardsUpToAvailable() (no args)
-      await signer.writeContract({
-        address: vault,
-        abi: rewardsAbi as any,
-        functionName: "claimRewardsUpToAvailable", // or "claimRewards"
-        args: [],
-        account: signer.account, // Safe connector: this is the Safe address
-      });
+      for (const r of rewards) {
+        await signer.writeContract({
+          address: r.vault,
+          abi: rewardsAbi as any,
+          functionName: "claimRewardsUpToAvailable", // or "claimRewards"
+          args: [],
+          account: signer.account, // Safe connector: this is the Safe address
+        });
+      }
 
       await refetch();
     } catch (err) {
@@ -139,7 +153,8 @@ const ClaimRewards: React.FC = () => {
             priceUsdForSymbol,
             isClaiming: (r: any) => {
               const raw = (r as any).__raw as RowRaw | undefined;
-              return !!raw && claimingKey === raw.vault.toLowerCase();
+              const key = raw?.rewards?.[0]?.vault?.toLowerCase?.();
+              return !!key && claimingKey === key;
             },
           }}
           emptyMessage="No rewards to claim yet."
@@ -155,19 +170,31 @@ const ClaimRewards: React.FC = () => {
             setSelectedReward(null);
           }}
           onClaim={handleModalClaim}
-          rewards={[
-            {
-              token: selectedReward.token,
-              symbol: `${selectedReward.claimable} ${selectedReward.token}`,
-              amount: parseFloat(selectedReward.claimable),
-              usdValue:
-                parseFloat(selectedReward.claimable) *
-                priceUsdForSymbol(selectedReward.token),
-              icon: `/tokens/${selectedReward.token.toLowerCase()}-icon.png`,
-              color: "bg-blue-100 dark:bg-blue-900/30",
-              checked: true,
-            },
-          ]}
+          rewards={
+            selectedReward.__raw?.rewards?.length
+              ? selectedReward.__raw.rewards.map((r) => ({
+                  token: r.symbol,
+                  symbol: `${Number(formatUnits(r.earned, 6)).toFixed(4)} ${r.symbol}`,
+                  amount: Number(formatUnits(r.earned, 6)),
+                  usdValue: r.usd,
+                  icon: `/tokens/${r.symbol.toLowerCase()}-icon.png`,
+                  color: r.symbol === "USDC" ? "bg-blue-100 dark:bg-blue-900/30" : "bg-cyan-100 dark:bg-cyan-900/30",
+                  checked: true,
+                }))
+              : [
+                  {
+                    token: selectedReward.token,
+                    symbol: `${selectedReward.claimable} ${selectedReward.token}`,
+                    amount: parseFloat(selectedReward.claimable),
+                    usdValue:
+                      parseFloat(selectedReward.claimable) *
+                      priceUsdForSymbol(selectedReward.token),
+                    icon: `/tokens/${selectedReward.token.toLowerCase()}-icon.png`,
+                    color: "bg-blue-100 dark:bg-blue-900/30",
+                    checked: true,
+                  },
+                ]
+          }
         />
       )}
     </>

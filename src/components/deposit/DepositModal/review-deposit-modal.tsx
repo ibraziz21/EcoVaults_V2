@@ -891,7 +891,11 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
               </div>
             </div>
 
-            {error && <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3 mt-2">{error}</div>}
+            {error && (
+              <div className="rounded-lg bg-red-50 text-red-700 text-xs p-3 mt-2 max-h-24 overflow-y-auto">
+                {error}
+              </div>
+            )}
           </div>
 
           <div className="px-5 pb-5">
