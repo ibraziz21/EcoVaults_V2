@@ -69,6 +69,11 @@ export function ClaimRewardsModal({
   const queryClient = useQueryClient()
   const [state, setState] = useState<ModalState>("initial")
   const [rewards, setRewards] = useState<Reward[]>(initialRewards || DEFAULT_REWARDS)
+  const resetAndClose = () => {
+    setState("initial")
+    setRewards(initialRewards || DEFAULT_REWARDS)
+    onClose()
+  }
 
   // ✅ Call hook once at top level
   const { priceUsdForSymbol } = useUsdPrices()
@@ -127,13 +132,12 @@ export function ClaimRewardsModal({
   }
 
   const handleExploreVaults = () => {
-    onClose()
+    resetAndClose()
     router.push("/vaults")
   }
 
   const handleBackToDashboard = () => {
-    setState("initial")
-    onClose()
+    resetAndClose()
   }
 
   const getColorIndicator = (reward: Reward) => {

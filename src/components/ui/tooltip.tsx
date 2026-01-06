@@ -2,8 +2,22 @@
 'use client'
 import * as TooltipPrimitive from '@radix-ui/react-tooltip'
 import { cn } from '@/lib/utils'
+import React from 'react'
 
-export const TooltipProvider = TooltipPrimitive.Provider
+export function TooltipProvider({
+  delayDuration = 100,
+  skipDelayDuration = 0,
+  ...props
+}: TooltipPrimitive.TooltipProviderProps) {
+  return (
+    <TooltipPrimitive.Provider
+      delayDuration={delayDuration}
+      skipDelayDuration={skipDelayDuration}
+      {...props}
+    />
+  )
+}
+
 export const Tooltip = TooltipPrimitive.Root
 export const TooltipTrigger = TooltipPrimitive.Trigger
 
