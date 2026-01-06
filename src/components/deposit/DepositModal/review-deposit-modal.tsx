@@ -1,7 +1,7 @@
 // src/components/deposit/DepositModal/review-deposit-modal.tsx
 'use client'
 
-import { FC, useMemo, useState, useEffect, useCallback } from 'react'
+import { FC, useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import Image from 'next/image'
 import { X, ExternalLink, Clock, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -54,6 +54,8 @@ interface ReviewDepositModalProps {
 
 const TAG = '[deposit]'
 const ZERO32 = `0x${'0'.repeat(64)}` as `0x${string}`
+const STATUS_POLL_INTERVAL_MS = 5000
+const STATUS_POLL_TIMEOUT_MS = 4 * 60_000
 
 function opTxUrl(hash: `0x${string}`) {
   return `https://optimistic.etherscan.io/tx/${hash}`
@@ -85,15 +87,30 @@ async function ensureConnected(
 ) {
   if (isConnected) return
 
+  const isSafeEnv = typeof window !== 'undefined' && window.parent !== window
   const safeConnector = connectors.find((c) => c.id === 'safe')
+  const injectedConnector = connectors.find((c) => c.id === 'injected')
+
+  if (safeConnector && isSafeEnv) {
+    try {
+      await connectAsync({ connector: safeConnector })
+      return
+    } catch (err) {
+      console.warn('[connect] Safe connector failed, falling back to injected', err)
+    }
+  }
+
+  if (injectedConnector) {
+    await connectAsync({ connector: injectedConnector })
+    return
+  }
+
   if (safeConnector) {
     await connectAsync({ connector: safeConnector })
     return
   }
 
-  const injectedConnector = connectors.find((c) => c.id === 'injected')
-  if (!injectedConnector) throw new Error('No wallet connector available')
-  await connectAsync({ connector: injectedConnector })
+  throw new Error('No wallet connector available')
 }
 
 function StepHintRow({ hint }: { hint: string }) {
@@ -140,6 +157,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
   // for retrying finish only
   const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
   const [lastFromTxHash, setLastFromTxHash] = useState<`0x${string}` | null>(null)
+  const pollAbortRef = useRef<AbortController | null>(null)
 
   // reset modal state on open
   useEffect(() => {
@@ -152,6 +170,8 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     setBridgeDone(false)
     setCurrentRefId(null)
     setLastFromTxHash(null)
+    pollAbortRef.current?.abort()
+    pollAbortRef.current = null
   }, [open])
 
   const amountNumber = Number(amount || 0)
@@ -176,6 +196,38 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
 
   const sourceTokenLabel = sourceSymbol
   const sourceChainLabel = 'OP Mainnet'
+
+  /* -------------------------------------------------------------------------- */
+  /* Status polling (for async finish)                                          */
+  /* -------------------------------------------------------------------------- */
+  const waitForTerminalStatus = useCallback(
+    async (refId: `0x${string}`) => {
+      const ctrl = new AbortController()
+      pollAbortRef.current = ctrl
+      const endAt = Date.now() + STATUS_POLL_TIMEOUT_MS
+
+      while (true) {
+        if (ctrl.signal.aborted) throw new Error('Status polling cancelled')
+        try {
+          const res = await fetch(`/api/deposits/status?refId=${refId}`, { signal: ctrl.signal })
+          const js = await res.json().catch(() => null)
+          if (!res.ok || !js?.ok) throw new Error(js?.error || 'Status check failed')
+
+          const status = String(js.status || '').toUpperCase()
+          if (status === 'MINTED') return js
+          if (status === 'FAILED') throw new Error(js?.error || 'Deposit failed')
+        } catch (err: any) {
+          if (ctrl.signal.aborted) throw err
+          // swallow transient errors; continue until timeout
+          console.warn(TAG, 'status poll error', err?.message || err)
+        }
+
+        if (Date.now() > endAt) throw new Error('Deposit is still processing. Please try resume in a moment.')
+        await new Promise((r) => setTimeout(r, STATUS_POLL_INTERVAL_MS))
+      }
+    },
+    [],
+  )
 
   /* -------------------------------------------------------------------------- */
   /* Create + sign deposit intent (OP)                                           */
@@ -305,6 +357,14 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
         throw new Error(json?.error || 'Failed to finalize deposit')
       }
 
+      const processing = res.status === 202 || json.waiting || json.processing
+      if (processing) {
+        const statusResult = await waitForTerminalStatus(currentRefId)
+        if (String(statusResult.status || '').toUpperCase() !== 'MINTED') {
+          throw new Error(statusResult?.error || 'Deposit did not complete')
+        }
+      }
+
       setStep('success')
       onSuccess({
         amount: Number(amount || 0),
@@ -331,6 +391,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     destTokenLabel,
     snap.token,
     sourceTokenLabel,
+    waitForTerminalStatus,
   ])
 
   /* -------------------------------------------------------------------------- */
@@ -353,6 +414,8 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     setBridgeSubmitted(false)
     setBridgeDone(false)
     setBridgeTxHash(null)
+    pollAbortRef.current?.abort()
+    pollAbortRef.current = null
 
     try {
       if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
@@ -445,6 +508,14 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
         throw new Error(finishJson?.error || 'Failed to finalize deposit')
       }
 
+      const processing = finishRes.status === 202 || finishJson.waiting || finishJson.processing
+      if (processing) {
+        const statusResult = await waitForTerminalStatus(refId)
+        if (String(statusResult.status || '').toUpperCase() !== 'MINTED') {
+          throw new Error(statusResult?.error || 'Deposit did not complete')
+        }
+      }
+
       setStep('success')
       onSuccess({
         amount: Number(amount || 0),
@@ -478,6 +549,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     onClose,
     receiveDisplay,
     sourceTokenLabel,
+    waitForTerminalStatus,
   ])
 
   // ---------- UI state mapping ----------
@@ -571,6 +643,17 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     }
   }
 
+  const onCloseSafe = () => {
+    if (isWorking && currentRefId) {
+      const ok = window.confirm(
+        'Your deposit is still finalizing. Closing will hide progress, but the process will continue. Close anyway?',
+      )
+      if (!ok) return
+    }
+    pollAbortRef.current?.abort()
+    onClose()
+  }
+
   return (
     <div className={`fixed inset-0 z-[100] ${open ? '' : 'pointer-events-none'}`}>
       <div className={`absolute inset-0 bg-black/50 transition-opacity ${open ? 'opacity-100' : 'opacity-0'}`} />
@@ -584,7 +667,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
             <h3 className="text-xl font-semibold flex items-center gap-2">
               {step === 'error' ? 'Deposit failed' : "You're depositing"}
             </h3>
-            <button onClick={onClose} className="cursor-pointer p-2 hover:bg-muted rounded-full">
+            <button onClick={onCloseSafe} className="cursor-pointer p-2 hover:bg-muted rounded-full" disabled={false}>
               <X size={20} />
             </button>
           </div>

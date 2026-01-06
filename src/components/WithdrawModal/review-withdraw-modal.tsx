@@ -166,11 +166,32 @@ export const ReviewWithdrawModal: FC<Props> = ({
   const { connect, connectors } = useConnect()
 
   function openConnect() {
+    const isSafeEnv = typeof window !== 'undefined' && window.parent !== window
     const safeConn = connectors.find((c) => c.id === 'safe')
     const injectedConn = connectors.find((c) => c.id === 'injected')
-    const connector = safeConn ?? injectedConn ?? connectors[0]
-    if (!connector) throw new Error('No wallet connectors available')
-    connect({ connector })
+    const fallback = connectors[0]
+
+    if (isSafeEnv && safeConn) {
+      connect({ connector: safeConn }).catch((err) => {
+        console.warn('[connect] Safe connector failed, falling back to injected', err)
+        if (injectedConn) connect({ connector: injectedConn })
+        else if (fallback) connect({ connector: fallback })
+      })
+      return
+    }
+
+    if (injectedConn) {
+      connect({ connector: injectedConn })
+      return
+    }
+
+    if (safeConn) {
+      connect({ connector: safeConn })
+      return
+    }
+
+    if (!fallback) throw new Error('No wallet connectors available')
+    connect({ connector: fallback })
   }
 
   const [step, setStep] = useState<FlowStep>('idle')
