@@ -13,7 +13,7 @@ import MyPositions from '@/components/tables/MyPositionsTable/MyPositions'
 import { ConnectWalletPrompt } from '@/components/ConnectWalletPrompt'
 import { ArrowRight } from '@phosphor-icons/react'
 import { Button } from '@/components/ui/button'
-import { useMerklRewards } from '@/hooks/useMerklRewards'
+import { useVaultRewards } from '@/hooks/useVaultRewards'
 
 import { formatUnits } from 'viem'
 import { MultiSelectComboBox } from '@/components/multi-select-combobox'
@@ -67,7 +67,6 @@ function toSnapshotFromPosition(p: {
 export default function Dashboard() {
   const [depositSnap, setDepositSnap] = useState<YieldSnapshot | null>(null)
   const { address, isConnected } = useAccount()
-  const { refetch } = useMerklRewards()
   const [selectedNetworks, setSelectedNetworks] = useState<string[]>([])
   const [selectedProtocols, setSelectedProtocols] = useState<string[]>([])
 
@@ -96,20 +95,20 @@ export default function Dashboard() {
   // ──────────────────────────────────────────────────────
   // Claimable rewards total ($) using Merkl + live prices
   // ──────────────────────────────────────────────────────
-  const { rewards, isLoading: isRewardsLoading } = useMerklRewards()
   const { priceUsdForSymbol, isLoading: isPricesLoading } = useUsdPrices()
+  const { data: vaultRewards, isLoading: isVaultRewardsLoading } = useVaultRewards()
 
   const totalClaimableUsd = useMemo(() => {
-    if (!rewards || rewards.length === 0) return 0
+    if (!vaultRewards) return 0
+    const usdc = vaultRewards.byToken.USDC?.earned ?? 0n
+    const usdt = vaultRewards.byToken.USDT?.earned ?? 0n
+    const usd =
+      Number(formatUnits(usdc, 6)) * priceUsdForSymbol('USDC') +
+      Number(formatUnits(usdt, 6)) * priceUsdForSymbol('USDT')
+    return usd
+  }, [vaultRewards, priceUsdForSymbol])
 
-    return rewards.reduce((sum, r) => {
-      const qty = Number(formatUnits(BigInt(r.claimable), r.token.decimals)) || 0
-      const price = priceUsdForSymbol(r.token.symbol)
-      return sum + qty * price
-    }, 0)
-  }, [rewards, priceUsdForSymbol])
-
-  const isClaimableLoading = isRewardsLoading || isPricesLoading
+  const isClaimableLoading = isPricesLoading || isVaultRewardsLoading
 
   // Filter options - same as positions page
   const networkOptions = [
