@@ -49,6 +49,22 @@ if (!RELAYER_PRIVATE_KEY_RAW) {
 const RELAYER_PRIVATE_KEY = (`0x${RELAYER_PRIVATE_KEY_RAW.replace(/^0x/i, '')}`) as `0x${string}`
 const relayer = privateKeyToAccount(RELAYER_PRIVATE_KEY)
 
+// Simple in-process mutex to serialize relayer tx nonces (prevent underpriced replacements)
+let mintLock: Promise<void> = Promise.resolve()
+const withMintLock = async <T,>(fn: () => Promise<T>): Promise<T> => {
+  const prev = mintLock.catch(() => {})
+  let release: () => void = () => {}
+  mintLock = new Promise<void>((res) => {
+    release = res
+  })
+  await prev
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
 /* ────────────────────────────────────────────────────────────
    Classification helpers: choose asset kind, Morpho pool and
    OP rewards vault (USDC vs USDT)
@@ -248,17 +264,27 @@ function makeOpClients() {
    Mint on Optimism (USDC vs USDT based on intent)
    ──────────────────────────────────────────────────────────── */
 async function mintReceipt(user: `0x${string}`, amount: bigint, rewardsVault: `0x${string}`) {
-  const { pub, wlt, account } = makeOpClients()
-  const { request } = await pub.simulateContract({
-    address: rewardsVault,
-    abi: rewardsAbi,
-    functionName: 'recordDeposit',
-    args: [user, amount],
-    account,
+  return await withMintLock(async () => {
+    const { pub, wlt, account } = makeOpClients()
+
+    // Serialize nonce against any in-flight txs from the relayer (recordDeposit)
+    const nonce = await pub.getTransactionCount({
+      address: account.address,
+      blockTag: 'pending',
+    })
+
+    const { request } = await pub.simulateContract({
+      address: rewardsVault,
+      abi: rewardsAbi,
+      functionName: 'recordDeposit',
+      args: [user, amount],
+      account,
+      nonce,
+    })
+    const mintTx = await wlt.writeContract({ ...request, nonce })
+    await pub.waitForTransactionReceipt({ hash: mintTx, confirmations: 3 })
+    return { mintTx }
   })
-  const mintTx = await wlt.writeContract(request)
-  await pub.waitForTransactionReceipt({ hash: mintTx, confirmations: 3 })
-  return { mintTx }
 }
 
 /* ────────────────────────────────────────────────────────────
