@@ -65,6 +65,22 @@ const withMintLock = async <T,>(fn: () => Promise<T>): Promise<T> => {
   }
 }
 
+// Lisk-side relayer mutex (approve/deposit) to avoid nonce races under load
+let liskLock: Promise<void> = Promise.resolve()
+const withLiskLock = async <T,>(fn: () => Promise<T>): Promise<T> => {
+  const prev = liskLock.catch(() => {})
+  let release: () => void = () => {}
+  liskLock = new Promise<void>((res) => {
+    release = res
+  })
+  await prev
+  try {
+    return await fn()
+  } finally {
+    release()
+  }
+}
+
 /* ────────────────────────────────────────────────────────────
    Classification helpers: choose asset kind, Morpho pool and
    OP rewards vault (USDC vs USDT)
@@ -503,16 +519,23 @@ export async function POST(req: Request) {
       await renewLease(refId, owner)
 
       await advanceIdempotent(refId, 'BRIDGED', 'DEPOSITING')
-      const { depositTx, verified } = await ensureAllowanceThenDeposit({
-        pub: liskPub as PublicClient,
-        account: relayer,
-        chain: lisk,
-        token: liskToken,
-        vaultAddr: morphoPool,
-        receiver: SAFEVAULT,
-        amount: amt,
-        morphoAbi,
-        log: console.log,
+      const { depositTx, verified } = await withLiskLock(async () => {
+        const baseNonce = await liskPub.getTransactionCount({
+          address: relayer.address,
+          blockTag: 'pending',
+        })
+        return await ensureAllowanceThenDeposit({
+          pub: liskPub as PublicClient,
+          account: relayer,
+          chain: lisk,
+          token: liskToken,
+          vaultAddr: morphoPool,
+          receiver: SAFEVAULT,
+          amount: amt,
+          morphoAbi,
+          log: console.log,
+          nonce: Number(baseNonce),
+        })
       })
 
       if (verified.sender.toLowerCase() !== relayer.address.toLowerCase()) {

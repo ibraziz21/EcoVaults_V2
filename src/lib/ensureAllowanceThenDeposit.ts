@@ -45,6 +45,7 @@ export async function ensureAllowanceThenDeposit(params: {
   amount: bigint // base units (6d)
   morphoAbi: any // must include deposit(uint256,address)
   log?: (msg: string, extra?: any) => void
+  nonce?: number // optional starting nonce (pending)
 }) {
   const {
     pub,
@@ -56,9 +57,16 @@ export async function ensureAllowanceThenDeposit(params: {
     amount,
     morphoAbi,
     log = () => {},
+    nonce,
   } = params
 
   const holder = account.address
+  let nextNonce =
+    nonce ??
+    (await pub.getTransactionCount({
+      address: holder,
+      blockTag: 'pending',
+    }))
 
   // 0) balance & allowance
   const [bal, allowance] = await Promise.all([
@@ -102,6 +110,7 @@ export async function ensureAllowanceThenDeposit(params: {
           functionName: 'approve',
           args: [vaultAddr, 0n],
         }),
+        nonce: nextNonce++,
       })
       log('[ensureAllowanceThenDeposit] approve(0)', { tx0 })
       await pub.waitForTransactionReceipt({ hash: tx0 })
@@ -121,6 +130,7 @@ export async function ensureAllowanceThenDeposit(params: {
         functionName: 'approve',
         args: [vaultAddr, amount],
       }),
+      nonce: nextNonce++,
     })
     log('[ensureAllowanceThenDeposit] approve(N)', { tx1, amount: amount.toString() })
 
@@ -168,6 +178,7 @@ export async function ensureAllowanceThenDeposit(params: {
       functionName: 'deposit',
       args: [amount, receiver],
     }),
+    nonce: nextNonce++,
   })
 
   log('[ensureAllowanceThenDeposit] deposit()', { depositTx })
