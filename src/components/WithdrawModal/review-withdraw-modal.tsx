@@ -5,7 +5,7 @@ import { FC, useEffect, useMemo, useState } from 'react'
 import Image from 'next/image'
 import { X, ExternalLink, Loader2, Clock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useWalletClient, useConnect } from 'wagmi'
+import { useAccount, useChainId, useWalletClient, useConnect } from 'wagmi'
 import { parseUnits } from 'viem'
 import { optimism } from 'viem/chains'
 import type { YieldSnapshot } from '@/hooks/useYields'
@@ -100,35 +100,44 @@ function opTxUrl(hash: `0x${string}`) {
  * If chain id is available via walletClient.chain.id, use that first.
  */
 async function ensureOnOptimism(walletClient: any) {
+  const expected = optimism.id
   const known = walletClient?.chain?.id
-  if (known && known === optimism.id) return
-  if (known && known !== optimism.id) {
+  if (known && known === expected) return
+  if (known && known !== expected) {
     throw new Error('Please switch your wallet to OP Mainnet to continue.')
   }
 
   // Fallback to direct RPC request for Safe / injected connectors that support it.
   if (typeof walletClient?.request === 'function') {
-    const hex = (await walletClient.request({ method: 'eth_chainId' })) as string
-    const chainId = Number.parseInt(hex, 16)
-    if (chainId === optimism.id) return
-
     try {
-      await walletClient.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: `0x${optimism.id.toString(16)}` }],
-      })
-    } catch {
+      const hex = (await walletClient.request({ method: 'eth_chainId' })) as string
+      const chainId = Number.parseInt(hex, 16)
+      if (chainId === expected) return
+      throw new Error('Please switch your wallet to OP Mainnet to continue.')
+    } catch (err) {
+      const msg = (err as any)?.message || ''
+      // If mismatch, propagate; otherwise log and propagate generic OP message.
+      if (!msg.includes('Please switch your wallet to OP Mainnet to continue.')) {
+        console.warn('[withdraw modal] eth_chainId check failed', err)
+      }
       throw new Error('Please switch your wallet to OP Mainnet to continue.')
     }
-
-    const hex2 = (await walletClient.request({ method: 'eth_chainId' })) as string
-    const chainId2 = Number.parseInt(hex2, 16)
-    if (chainId2 !== optimism.id) throw new Error('Please switch your wallet to OP Mainnet to continue.')
-    return
   }
 
   // If we cannot query chain id, fail safely.
   throw new Error('Please switch your wallet to OP Mainnet to continue.')
+}
+
+function friendlyError(e: any) {
+  const msg = e?.message || e?.shortMessage || String(e)
+  const lower = msg.toLowerCase()
+  if (lower.includes('chainid') && lower.includes('current chainid')) {
+    return 'Please switch to OP Mainnet to continue.'
+  }
+  if (lower.includes('switch to op mainnet') || lower.includes('switch your wallet to op mainnet')) {
+    return 'Please switch to OP Mainnet to continue.'
+  }
+  return msg
 }
 
 /** Matches the deposit modal so the ETA block never jumps when hint/title changes. */
@@ -216,6 +225,9 @@ export const ReviewWithdrawModal: FC<Props> = ({
   const [bridgeDone, setBridgeDone] = useState(false)
   const [bridgeTxHash, setBridgeTxHash] = useState<`0x${string}` | null>(null)
 
+  const { connector } = useAccount()
+  const chainId = useChainId()
+
   useEffect(() => {
     if (!open) return
     setStep('idle')
@@ -273,6 +285,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
                 ? 'Retry bridge'
                 : 'Try again'
               : 'Withdraw now'
+  const mustBeOnOp = chainId !== optimism.id
 
   /* ------------------------------------------------------------------------ */
   /* Main confirm flow — OP-sign intent, relayer finishes                      */
@@ -281,6 +294,21 @@ export const ReviewWithdrawModal: FC<Props> = ({
   async function handleConfirm() {
     if (!walletClient) {
       openConnect()
+      return
+    }
+    // Hard guard: Safe cannot auto-switch; block if wrong chain.
+    const connectorName = connector?.name?.toLowerCase?.() || ''
+    const isSafeConnector = connectorName.includes('safe') || connector?.id === 'safe'
+    if (mustBeOnOp) {
+      console.warn('[withdraw modal] blocked: wrong chain', {
+        chainId,
+        isSafeConnector,
+        connector: connector?.name,
+        walletChain: walletClient?.chain?.id,
+        expected: optimism.id,
+      })
+      setErr('Please switch to OP Mainnet to continue.')
+      setStep('idle')
       return
     }
 
@@ -409,7 +437,7 @@ export const ReviewWithdrawModal: FC<Props> = ({
       console.error('[withdraw modal] handleConfirm failed:', e)
       const code = e?.code ?? e?.error?.code
       if (code === 4001) setErr('Signature was cancelled.')
-      else setErr(e?.message ?? String(e))
+      else setErr(friendlyError(e))
       setStep('error')
     }
   }

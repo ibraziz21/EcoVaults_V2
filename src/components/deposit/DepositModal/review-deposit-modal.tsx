@@ -5,7 +5,7 @@ import { FC, useMemo, useState, useEffect, useCallback, useRef } from 'react'
 import Image from 'next/image'
 import { X, ExternalLink, Clock, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { useAccount, useConnect, useWalletClient } from 'wagmi'
+import { useAccount, useChainId, useConnect, useWalletClient } from 'wagmi'
 import { parseUnits, type WalletClient } from 'viem'
 import type { YieldSnapshot } from '@/hooks/useYields'
 import lifilogo from '@/public/lifi.png'
@@ -73,10 +73,28 @@ function randomBytes32(): `0x${string}` {
     .join('')}` as `0x${string}`
 }
 
-function assertOnOptimism(walletClient: WalletClient) {
+async function assertOnOptimism(walletClient: WalletClient) {
+  const expected = CHAINS.optimism.id
   const current = walletClient.chain?.id
-  if (current && current !== CHAINS.optimism.id) {
+  if (current && current !== expected) {
     throw new Error('Please switch your wallet to OP Mainnet to continue.')
+  }
+  // Additional runtime check: ask the wallet directly for its chain to avoid false positives
+  if (typeof (walletClient as any)?.request === 'function') {
+    try {
+      const hex = (await (walletClient as any).request({ method: 'eth_chainId' })) as string
+      const rpcChain = Number.parseInt(hex, 16)
+      if (rpcChain && rpcChain !== expected) {
+        throw new Error('Please switch your wallet to OP Mainnet to continue.')
+      }
+    } catch (err) {
+      const msg = (err as any)?.message || ''
+      // If it was a mismatch, propagate; otherwise log and continue.
+      if (msg.includes('Please switch your wallet to OP Mainnet to continue.')) {
+        throw err
+      }
+      console.warn('[deposit modal] eth_chainId check failed', err)
+    }
   }
 }
 
@@ -142,6 +160,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
   } = props
 
   const { isConnected } = useAccount()
+  const chainId = useChainId()
   const { connectors, connectAsync } = useConnect()
   const { data: walletClient } = useWalletClient()
 
@@ -175,7 +194,8 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
   }, [open])
 
   const amountNumber = Number(amount || 0)
-  const canStart = open && !!walletClient && Number.isFinite(amountNumber) && amountNumber > 0
+  const mustBeOnOptimism = chainId !== CHAINS.optimism.id
+  const canStart = open && !!walletClient && Number.isFinite(amountNumber) && amountNumber > 0 && !mustBeOnOptimism
 
   const feeDisplay = useMemo(() => bridgeFeeDisplay ?? 0, [bridgeFeeDisplay])
   const receiveDisplay = useMemo(() => receiveAmountDisplay ?? 0, [receiveAmountDisplay])
@@ -407,6 +427,19 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     // After connecting, wagmi may not have hydrated walletClient *this tick*.
     if (!walletClient) return
 
+    // Hard guard: must be on OP. Safe cannot auto-switch, so block here.
+    const walletChainId = walletClient.chain?.id
+    if (chainId !== CHAINS.optimism.id || (walletChainId && walletChainId !== CHAINS.optimism.id)) {
+      console.warn('[deposit modal] blocked: wrong chain', {
+        chainId,
+        walletChain: walletChainId,
+        expected: CHAINS.optimism.id,
+      })
+      setError('Please switch to OP Mainnet to continue.')
+      setStep('idle')
+      return
+    }
+
     setError(null)
     setBridgeOk(false)
 
@@ -421,7 +454,13 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       if (snap.chain !== 'lisk') throw new Error('Only Lisk deposits are supported in this build')
 
       // 1) Ensure OP (OP-only interactions; no programmatic switching)
-      assertOnOptimism(walletClient)
+      await assertOnOptimism(walletClient)
+
+      console.log('[deposit modal] proceeding on-chain ids', {
+        chainId,
+        walletChain: walletChainId,
+        expected: CHAINS.optimism.id,
+      })
 
       const user = walletClient.account!.address as `0x${string}`
       const inputAmt = parseUnits(amount || '0', sourceDecimals)

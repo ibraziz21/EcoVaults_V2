@@ -1,7 +1,7 @@
 // src/components/deposit/deposit-withdraw.tsx
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import { ChevronDown } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,8 @@ import { SelectTokenModal } from './select-token-modal';
 import { DepositModal } from './DepositModal/review-deposit-modal';
 import { ReviewWithdrawModal } from '../WithdrawModal/review-withdraw-modal';
 import logolifi from '@/public/lifi.png';
-import { useWalletClient } from 'wagmi';
+import { useAccount, useChainId, useSwitchChain, useWalletClient } from 'wagmi';
+import { optimism } from 'wagmi/chains';
 import { useQueryClient } from '@tanstack/react-query';
 import { parseUnits } from 'viem';
 
@@ -140,6 +141,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
   // Route & fees expanded state
   const [routeExpanded, setRouteExpanded] = useState(false);
   const [balanceRefreshTick, setBalanceRefreshTick] = useState(0);
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
   // Success modals
   const [showDepositSuccess, setShowDepositSuccess] = useState(false);
@@ -147,6 +149,10 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
 
   const [showWithdrawSuccess, setShowWithdrawSuccess] = useState(false);
   const [withdrawSuccessData, setWithdrawSuccessData] = useState<any>(null);
+
+  const { connector } = useAccount();
+  const chainId = useChainId();
+  const { switchChainAsync, isPending: isSwitchingChain } = useSwitchChain();
 
   const handleDepositSuccess = (data: any) => {
     if (walletClient?.account?.address) {
@@ -632,13 +638,44 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
     }
   }, [selectedToken.id, opUsdcBal, opUsdtBal, availableTokenBalances.USDT0_OP]);
 
-  const onDepositClick = () => {
+  const ensureOptimism = useCallback(async () => {
+    // Auto-switch to OP; if connector cannot switch (e.g., Safe App), block with a clear message.
+    if (chainId === optimism.id) {
+      setSwitchError(null);
+      return true;
+    }
+
+    // If the connector cannot switch (Safe App often), show message and block.
+    const connectorName = connector?.name?.toLowerCase?.() || '';
+    const isSafeConnector = connectorName.includes('safe');
+
+    if (!switchChainAsync || isSafeConnector) {
+      setSwitchError('Please switch the app/network to OP Mainnet and try again.');
+      return false;
+    }
+
+    try {
+      await switchChainAsync({ chainId: optimism.id });
+      setSwitchError(null);
+      return true;
+    } catch (err: any) {
+      console.warn('[deposit-withdraw] switch to OP failed', err?.message || err);
+      setSwitchError('Please switch to OP Mainnet to continue.');
+      return false;
+    }
+  }, [chainId, switchChainAsync, connector]);
+
+  const onDepositClick = async () => {
     if (confirmDisabled || activeTab !== 'deposit') return;
+    const ok = await ensureOptimism();
+    if (!ok) return;
     setShowReview(true);
   };
 
-  const onWithdrawClick = () => {
+  const onWithdrawClick = async () => {
     if (!(amountNum > 0) || !snap) return;
+    const ok = await ensureOptimism();
+    if (!ok) return;
     setShowWithdrawReview(true);
   };
 
@@ -863,12 +900,15 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
               <Button
                 onClick={activeTab === 'deposit' ? onDepositClick : onWithdrawClick}
                 size="lg"
-                disabled={confirmDisabled}
+                disabled={confirmDisabled || isSwitchingChain}
                 className="w-full text-white bg-blue-600 hover:bg-blue-700 text-base font-semibold h-12 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl"
                 title={quoteError ?? (activeTab === 'deposit' ? 'Deposit' : 'Withdraw')}
               >
                 {activeTab === 'deposit' ? 'Deposit' : 'Withdraw'}
               </Button>
+              {switchError && (
+                <p className="text-xs text-destructive text-center mt-2">{switchError}</p>
+              )}
 
               {/* Routing via LI.FI bridge Section */}
               <div className="border border-border rounded-xl overflow-hidden">
