@@ -2,5 +2,10 @@
     "name": "EcoVaults (Local)",
     "description": "SuperYLDR EcoVaults test app (local/dev).",
     "iconPath": "@/public/eco-vaults.svg",
-    "providedBy": { "name": "Lile Labs" }
+    "providedBy": { "name": "Lile Labs" },
+      "allowedDomains": [
+    "https://super-yield-r.vercel.app",
+    "https://eco-vaults-v2.vercel.app",
+    "http://localhost:3000"
+  ]
   }
