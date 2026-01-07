@@ -20,7 +20,7 @@ import morphoAbi from '@/lib/abi/morphoLisk.json'
 import rewardsAbi from '@/lib/abi/rewardsAbi.json'
 import {
   TokenAddresses,
-  SAFEVAULT,
+  SAFEVAULTS,
   REWARDS_VAULT,
   MORPHO_POOLS,
   ADAPTER_KEYS,
@@ -100,6 +100,7 @@ function classifyIntentForVault(intent: { asset?: string | null; adapterKey?: st
       liskToken: TokenAddresses.USDCe.lisk as `0x${string}`,
       morphoPool: MORPHO_POOLS['usdce-supply'] as `0x${string}`,
       opRewardsVault: REWARDS_VAULT.optimismUSDC as `0x${string}`,
+      safeVault: SAFEVAULTS.USDC as `0x${string}`,
     }
   }
   if (assetLc === usdt0Lisk) {
@@ -108,6 +109,7 @@ function classifyIntentForVault(intent: { asset?: string | null; adapterKey?: st
       liskToken: TokenAddresses.USDT0.lisk as `0x${string}`,
       morphoPool: MORPHO_POOLS['usdt0-supply'] as `0x${string}`,
       opRewardsVault: REWARDS_VAULT.optimismUSDT as `0x${string}`,
+      safeVault: SAFEVAULTS.USDT as `0x${string}`,
     }
   }
 
@@ -119,6 +121,7 @@ function classifyIntentForVault(intent: { asset?: string | null; adapterKey?: st
       liskToken: TokenAddresses.USDCe.lisk as `0x${string}`,
       morphoPool: MORPHO_POOLS['usdce-supply'] as `0x${string}`,
       opRewardsVault: REWARDS_VAULT.optimismUSDC as `0x${string}`,
+      safeVault: SAFEVAULTS.USDC as `0x${string}`,
     }
   }
   if (keyLc && keyLc === (ADAPTER_KEYS.morphoLiskUSDT0 as string).toLowerCase()) {
@@ -127,6 +130,7 @@ function classifyIntentForVault(intent: { asset?: string | null; adapterKey?: st
       liskToken: TokenAddresses.USDT0.lisk as `0x${string}`,
       morphoPool: MORPHO_POOLS['usdt0-supply'] as `0x${string}`,
       opRewardsVault: REWARDS_VAULT.optimismUSDT as `0x${string}`,
+      safeVault: SAFEVAULTS.USDT as `0x${string}`,
     }
   }
 
@@ -407,7 +411,7 @@ export async function POST(req: Request) {
 
     // Figure out what this intent *actually* targets (USDC vs USDT)
     const classification = classifyIntentForVault(intent)
-    const { liskToken, morphoPool, opRewardsVault } = classification
+    const { liskToken, morphoPool, opRewardsVault, safeVault } = classification
 
     // short-circuit if already MINTED
     if (intent.status === 'MINTED' && intent.mintTxHash) {
@@ -530,7 +534,7 @@ export async function POST(req: Request) {
           chain: lisk,
           token: liskToken,
           vaultAddr: morphoPool,
-          receiver: SAFEVAULT,
+          receiver: safeVault,
           amount: amt,
           morphoAbi,
           log: console.log,
@@ -544,7 +548,7 @@ export async function POST(req: Request) {
       if (verified.vault.toLowerCase() !== morphoPool.toLowerCase()) {
         throw new Error('Deposit vault mismatch')
       }
-      if (verified.receiver.toLowerCase() !== SAFEVAULT.toLowerCase()) {
+      if (verified.receiver.toLowerCase() !== safeVault.toLowerCase()) {
         throw new Error('Deposit receiver mismatch (must be SAFE)')
       }
       if (verified.token.toLowerCase() !== liskToken.toLowerCase()) {

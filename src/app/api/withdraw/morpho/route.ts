@@ -17,7 +17,7 @@ import { OperationType } from '@safe-global/types-kit'
 
 // Contracts / constants
 import rewardsVaultAbi from '@/lib/abi/rewardsAbi.json'
-import { TokenAddresses, SAFEVAULT, MORPHO_POOLS, REWARDS_VAULT } from '@/lib/constants'
+import { TokenAddresses, SAFEVAULTS, MORPHO_POOLS, REWARDS_VAULT } from '@/lib/constants'
 
 // LI.FI (server-side)
 import { createConfig, EVM, getQuote, convertQuoteToRoute, executeRoute } from '@lifi/sdk'
@@ -277,7 +277,10 @@ export async function POST(req: Request) {
         ? (TokenAddresses.USDT.optimism as `0x${string}`)
         : (TokenAddresses.USDC.optimism as `0x${string}`)
 
-    const liskSafe = SAFEVAULT as `0x${string}`
+    const liskSafe =
+      tokenKind === 'USDT0'
+        ? (SAFEVAULTS.USDT as `0x${string}`)
+        : (SAFEVAULTS.USDC as `0x${string}`)
 
     // Vault asset (USDCe or USDT0) on Lisk
     const vaultAsset = (await liskPublic.readContract({

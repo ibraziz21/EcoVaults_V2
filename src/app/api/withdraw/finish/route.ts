@@ -27,7 +27,7 @@ import { createConfig, EVM, getQuote, convertQuoteToRoute, executeRoute } from '
 
 // Contracts / constants
 import rewardsVaultAbi from '@/lib/abi/rewardsAbi.json'
-import { TokenAddresses, SAFEVAULT, MORPHO_POOLS, REWARDS_VAULT } from '@/lib/constants'
+import { TokenAddresses, SAFEVAULTS, MORPHO_POOLS, REWARDS_VAULT } from '@/lib/constants'
 
 // State guard
 import { advanceWithdraw } from '@/domain/advance'
@@ -130,6 +130,7 @@ function pickFamilies(dstToken: `0x${string}`) {
     opToken: (isUSDT ? TokenAddresses.USDT.optimism : TokenAddresses.USDC.optimism) as `0x${string}`,
     // IMPORTANT: this is the OP receipt token (sVault) whose decimals define amountShares base units
     receiptToken: (isUSDT ? TokenAddresses.sVault.optimismUSDT : TokenAddresses.sVault.optimismUSDC) as `0x${string}`,
+    safeVault: (isUSDT ? SAFEVAULTS.USDT : SAFEVAULTS.USDC) as `0x${string}`,
   }
 }
 
@@ -214,7 +215,8 @@ export async function POST(req: Request) {
     const receiptShares = BigInt(row.amountShares)
     const minAmountOut = BigInt(row.minAmountOut)
 
-    const { rewardsVault, morphoPool, liskAsset, opToken, receiptToken } = pickFamilies(dstToken)
+    const { rewardsVault, morphoPool, liskAsset, opToken, receiptToken, safeVault } =
+      pickFamilies(dstToken)
 
     // Read actual decimals from chain (do NOT hardcode)
     const receiptDecimals = await readErc20Decimals(opPublic, receiptToken)
@@ -241,7 +243,7 @@ function applyBuffer(x: bigint) {
     /* 0) Preflight: make sure redeemShares produces >0 assets, and Safe has shares
           (Fail BEFORE burn to avoid accounting mismatch) */
     {
-      const safeShareBal = await readErc20Bal(liskPublic, morphoPool, SAFEVAULT as `0x${string}`)
+      const safeShareBal = await readErc20Bal(liskPublic, morphoPool, safeVault as `0x${string}`)
       const previewAssets = (await liskPublic.readContract({
         address: morphoPool,
         abi: ERC4626_ABI,
@@ -315,13 +317,13 @@ function applyBuffer(x: bigint) {
       const calldata = encodeFunctionData({
         abi: ERC4626_ABI,
         functionName: 'redeem',
-        args: [redeemShares, relayer.address as `0x${string}`, SAFEVAULT as `0x${string}`],
+        args: [redeemShares, relayer.address as `0x${string}`, safeVault as `0x${string}`],
       })
 
       const protocolKit = await Safe.init({
         provider: LSK_RPC,
         signer: RELAYER_PK,
-        safeAddress: SAFEVAULT,
+        safeAddress: safeVault,
       })
 
       const tx: MetaTransactionData = {

@@ -31,7 +31,15 @@ export const ROUTERS: Record<'optimism' | 'base' | 'lisk', `0x${string}`> = {
   lisk:     '0x538e15a133b72C60Ddcea6af0Ff7EFEC1fD512fA',
 } as const
 
-export const SAFEVAULT = '0x2bbcdd9B52906c360c4d0789719982efC681B224'
+const LEGACY_SAFEVAULT = '0x2bbcdd9B52906c360c4d0789719982efC681B224'
+
+export const SAFEVAULTS = {
+  USDC: (process.env.SAFEVAULT_USDC as `0x${string}` | undefined) ?? (LEGACY_SAFEVAULT as `0x${string}`),
+  USDT: (process.env.SAFEVAULT_USDT as `0x${string}` | undefined) ?? (LEGACY_SAFEVAULT as `0x${string}`),
+} as const
+
+// Backward compat: defaults to USDC Safe
+export const SAFEVAULT = SAFEVAULTS.USDC
 
 /** 3-chain token map */
 export const TokenAddresses = {

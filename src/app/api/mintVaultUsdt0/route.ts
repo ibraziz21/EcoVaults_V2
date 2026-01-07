@@ -10,7 +10,7 @@ import { privateKeyToAccount } from 'viem/accounts'
 import { lisk, optimism } from 'viem/chains'
 import rewardsAbi from '@/lib/abi/rewardsAbi.json'
 import morphoAbi from '@/lib/abi/morphoLisk.json'
-import { TokenAddresses, SAFEVAULT, MORPHO_POOLS } from '@/lib/constants'
+import { TokenAddresses, SAFEVAULTS, MORPHO_POOLS } from '@/lib/constants'
 import * as dotenv from 'dotenv'
 dotenv.config()
 
@@ -144,12 +144,12 @@ export async function POST(req: Request) {
       }
     }
 
-    /* 3) Vault deposit: deposit(amount, receiver=SAFEVAULT) */
+    /* 3) Vault deposit: deposit(amount, receiver=USDT Safe) */
     const { request: supplyReq } = await liskPublic.simulateContract({
       address: MORPHO_POOL,
       abi: morphoAbi,
       functionName: 'deposit',
-      args: [amount, SAFEVAULT as `0x${string}`],
+      args: [amount, SAFEVAULTS.USDT as `0x${string}`],
       account,
     })
     const depositTx = await liskClient.writeContract(supplyReq)
