@@ -14,7 +14,7 @@ import logolifi from '@/public/lifi.png';
 import { useAccount, useChainId, useSwitchChain, useWalletClient } from 'wagmi';
 import { optimism } from 'wagmi/chains';
 import { useQueryClient } from '@tanstack/react-query';
-import { parseUnits } from 'viem';
+import { parseUnits, formatUnits } from 'viem';
 
 import type { YieldSnapshot } from '@/hooks/useYields';
 import { getBridgeQuote, quoteUsdceOnLisk } from '@/lib/quotes';
@@ -38,6 +38,9 @@ interface Token {
 interface DepositWithdrawProps {
   initialTab?: 'deposit' | 'withdraw';
   snap?: YieldSnapshot;
+  /** Optional resume trigger: base-unit amount to prefill and open review */
+  resumeDeposit?: { amountBase: string; refId?: string };
+  onResumeHandled?: () => void;
 }
 
 function normalizeRouteLabel(raw?: string | null) {
@@ -76,7 +79,7 @@ function uiTokenLabel(t: string): string {
   return t === 'USDCe' ? 'USDC.e' : t;
 }
 
-export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdrawProps) {
+export function DepositWithdraw({ initialTab = 'deposit', snap, resumeDeposit, onResumeHandled }: DepositWithdrawProps) {
   const queryClient = useQueryClient();
   const { data: walletClient } = useWalletClient();
 
@@ -98,6 +101,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
 
   const [showTokenModal, setShowTokenModal] = useState(false);
   const [showReview, setShowReview] = useState(false);
+  const [resumeRefId, setResumeRefId] = useState<string | null>(null);
 
   const [showWithdrawReview, setShowWithdrawReview] = useState(false);
 
@@ -143,6 +147,45 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
   const [balanceRefreshTick, setBalanceRefreshTick] = useState(0);
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [flushPendingDone, setFlushPendingDone] = useState(false);
+
+  // Vault token + decimals (defined early for resume logic)
+  const vaultToken: 'USDC' | 'USDT' | 'WETH' = (snap?.token as any) ?? 'USDC';
+  const tokenDecimals = vaultToken === 'WETH' ? 18 : 6;
+
+  // Handle resume request: prefill amount and open review
+  useEffect(() => {
+    if (!resumeDeposit || !snap) return;
+    const raw = (resumeDeposit.amountBase || '').trim();
+    if (!raw) {
+      onResumeHandled?.();
+      return;
+    }
+
+    try {
+      const amtBase = BigInt(raw);
+      if (amtBase <= 0n) {
+        onResumeHandled?.();
+        return;
+      }
+      const human = formatUnits(amtBase, tokenDecimals);
+      setAmount(human);
+      setActiveTab('deposit');
+      setShowReview(true);
+      if (resumeDeposit.refId) setResumeRefId(resumeDeposit.refId);
+    } catch (err) {
+      // Fallback: if parsing to bigint fails, try a numeric string so we do not end up with 0
+      console.warn('[deposit-withdraw] resumeDeposit parse failed', err);
+      const num = Number(raw);
+      if (Number.isFinite(num) && num > 0) {
+        setAmount(String(num));
+        setActiveTab('deposit');
+        setShowReview(true);
+        if (resumeDeposit.refId) setResumeRefId(resumeDeposit.refId);
+      }
+    } finally {
+      onResumeHandled?.();
+    }
+  }, [resumeDeposit, snap, tokenDecimals, onResumeHandled]);
 
   // Flush any pending bridge tx hashes saved when modal was closed
   useEffect(() => {
@@ -193,6 +236,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
     }
     setBalanceRefreshTick((x) => x + 1);
     setAmount('');
+    setResumeRefId(null);
     setDepositSuccessData(data);
     setShowReview(false);
     setTimeout(() => setShowDepositSuccess(true), 300);
@@ -211,8 +255,6 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
     setTimeout(() => setShowWithdrawSuccess(true), 300);
   };
 
-  const vaultToken: 'USDC' | 'USDT' | 'WETH' = (snap?.token as any) ?? 'USDC';
-  const tokenDecimals = vaultToken === 'WETH' ? 18 : 6;
   const destTokenLabel = toLiskDestLabel(vaultToken);
   const isUsdtFamily = vaultToken === 'USDT' || destTokenLabel === 'USDT0';
 
@@ -1194,9 +1236,13 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
       {showReview && activeTab === 'deposit' && snap && (
         <DepositModal
           open={showReview}
-          onClose={() => setShowReview(false)}
+          onClose={() => {
+            setShowReview(false);
+            setResumeRefId(null);
+          }}
           onSuccess={handleDepositSuccess}
           snap={snap}
+          resumeRefId={resumeRefId as `0x${string}` | undefined}
           amount={amount}
           sourceSymbol={sourceSymbolForModal}
           destTokenLabel={destTokenLabel}

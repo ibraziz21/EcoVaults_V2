@@ -32,6 +32,8 @@ interface ReviewDepositModalProps {
   onClose: () => void
   onSuccess: (data: DepositSuccessData) => void
   snap: YieldSnapshot
+  /** Optional: reuse an existing intent instead of creating a new one */
+  resumeRefId?: `0x${string}`
 
   amount: string
   /** Now supports OP USDT0 + Lisk USDCe/USDT0 */
@@ -151,6 +153,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     onClose,
     onSuccess,
     snap,
+    resumeRefId,
     amount,
     sourceSymbol,
     destTokenLabel,
@@ -166,6 +169,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
 
   const [step, setStep] = useState<FlowStep>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [blockLeaving, setBlockLeaving] = useState(false)
 
   // progress flags for UI
   const [bridgeOk, setBridgeOk] = useState(false) // means: OP bridge tx broadcast succeeded
@@ -177,6 +181,10 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
   const [currentRefId, setCurrentRefId] = useState<`0x${string}` | null>(null)
   const [lastFromTxHash, setLastFromTxHash] = useState<`0x${string}` | null>(null)
   const pollAbortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    if (resumeRefId) setCurrentRefId(resumeRefId)
+  }, [resumeRefId])
 
   // reset modal state on open
   useEffect(() => {
@@ -191,7 +199,20 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
     setLastFromTxHash(null)
     pollAbortRef.current?.abort()
     pollAbortRef.current = null
+    setBlockLeaving(false)
   }, [open])
+
+  // Prevent closing/refresh while bridge tx hash not yet captured
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (blockLeaving && !bridgeTxHash) {
+        e.preventDefault()
+        e.returnValue = ''
+      }
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [blockLeaving, bridgeTxHash])
 
   const amountNumber = Number(amount || 0)
   const mustBeOnOptimism = chainId !== CHAINS.optimism.id
@@ -420,6 +441,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
   const handleConfirm = useCallback(async () => {
     // Show progress immediately so the stepper reflects work while signing
     setStep('bridging')
+    setBlockLeaving(true)
 
     // 0) Ensure connected (Safe first)
     await ensureConnected(isConnected, connectors, connectAsync)
@@ -465,8 +487,12 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       const user = walletClient.account!.address as `0x${string}`
       const inputAmt = parseUnits(amount || '0', sourceDecimals)
 
-      // 2) Create intent (store refId for retry)
-      const { refId } = await createDepositIntent()
+      // 2) Create intent (store refId for retry) unless resuming an existing one
+      let refId: `0x${string}` | null = (currentRefId ?? resumeRefId ?? null) as `0x${string}` | null
+      if (!refId) {
+        const created = await createDepositIntent()
+        refId = created.refId
+      }
       setCurrentRefId(refId)
 
       // 3) Fresh quote for minAmount (tolerate by small buffer)
@@ -547,6 +573,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
         } catch {}
       }
       if (!fromTxHash) throw new Error('Bridge executed but no txHash was captured from LiFi route')
+      setBlockLeaving(false)
 
       setLastFromTxHash(fromTxHash)
 

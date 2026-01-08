@@ -40,6 +40,8 @@ export async function GET(req: Request) {
       fromTxHash: true,
       toTxHash: true,
       depositTxHash: true,
+      amount: true,
+      minAmount: true,
       error: true,
       updatedAt: true,
     },

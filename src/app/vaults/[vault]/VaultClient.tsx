@@ -95,6 +95,7 @@ export default function VaultDetailPage() {
   const { intents: stuckIntents, isLoading: intentsLoading, refetch: refetchIntents } = useDepositIntents(address)
   const [showRetries, setShowRetries] = useState(false)
   const [retryingRefId, setRetryingRefId] = useState<string | null>(null)
+  const [resumeRequest, setResumeRequest] = useState<{ amountBase: string; refId?: string } | null>(null)
 
   // Derive variants using the canonical token (so USDT0/USDCe work)
   const vaultVariants = useMemo(() => {
@@ -438,7 +439,14 @@ export default function VaultDetailPage() {
 
             {/* Right Column - Deposit/Withdraw */}
             <div className="lg:sticky lg:top-6 h-fit">
-              {snapCandidate && <DepositWithdraw initialTab="deposit" snap={snapCandidate} />}
+              {snapCandidate && (
+                <DepositWithdraw
+                  initialTab="deposit"
+                  snap={snapCandidate}
+                  resumeDeposit={resumeRequest ?? undefined}
+                  onResumeHandled={() => setResumeRequest(null)}
+                />
+              )}
 
               {/* Pending / Failed Deposits (dropdown) */}
               {address && (
@@ -460,13 +468,20 @@ export default function VaultDetailPage() {
                   {showRetries && (
                     <div className="divide-y">
                       {stuckIntents.map((intent) => {
-                        const shortRef = `${intent.refId.slice(0, 6)}…${intent.refId.slice(-4)}`
-                        const status = intent.status?.toUpperCase?.() || 'UNKNOWN'
-                        const isFailed = status === 'FAILED' || !!intent.error
-                        const needsAction = isFailed || status === 'PENDING' || status === 'WAITING_ROUTE'
-                        const label = isFailed ? 'Retry' : needsAction ? 'Continue' : 'Processing…'
+                      const shortRef = `${intent.refId.slice(0, 6)}…${intent.refId.slice(-4)}`
+                      const status = intent.status?.toUpperCase?.() || 'UNKNOWN'
+                      const isFailed = status === 'FAILED' || !!intent.error
+                      const needsAction = isFailed || status === 'PENDING' || status === 'WAITING_ROUTE'
+                      const label = isFailed ? 'Retry' : needsAction ? 'Continue' : 'Processing…'
                         const disabled = retryingRefId === intent.refId || (!needsAction && !isFailed)
                         const btnVariant = isFailed ? 'destructive' : 'secondary'
+
+                        const hasBridge = intent.fromTxHash && intent.fromTxHash.trim().length > 0
+                        const hasDeposit = intent.depositTxHash && intent.depositTxHash.trim().length > 0
+                        const canResumeBridge = !hasBridge && !hasDeposit
+                        const showRetry = hasBridge || hasDeposit
+                        const baseAmount = intent.amount || intent.minAmount || '0'
+                        const canResume = canResumeBridge && BigInt(baseAmount || '0') > 0n
 
                         return (
                           <div key={intent.refId} className="px-5 py-3 flex items-center justify-between gap-3">
@@ -475,16 +490,26 @@ export default function VaultDetailPage() {
                               <div className="text-xs text-muted-foreground">{status}</div>
                               {intent.error && <div className="text-xs text-destructive truncate">{intent.error}</div>}
                             </div>
-                            <Button
-                              size="sm"
-                              variant={btnVariant as any}
-                              disabled={disabled}
-                              onClick={() => handleRetryIntent(intent.refId)}
-                            >
-                              {retryingRefId === intent.refId ? 'Working…' : label}
-                            </Button>
-                          </div>
-                        )
+                            {canResume ? (
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => setResumeRequest({ amountBase: baseAmount, refId: intent.refId })}
+                              >
+                                Start Bridge
+                              </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant={btnVariant as any}
+                                disabled={disabled}
+                                onClick={() => handleRetryIntent(intent.refId)}
+                              >
+                                {retryingRefId === intent.refId ? 'Working…' : label}
+                              </Button>
+                            )}
+                         </div>
+                       )
                       })}
                       {!intentsLoading && stuckIntents.length === 0 && (
                         <div className="px-5 py-3 text-sm text-muted-foreground">No pending deposits.</div>

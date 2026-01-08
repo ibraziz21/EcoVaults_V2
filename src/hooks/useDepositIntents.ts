@@ -6,6 +6,8 @@ type DepositIntentRow = {
   fromTxHash?: string | null
   toTxHash?: string | null
   depositTxHash?: string | null
+  amount?: string | null
+  minAmount?: string | null
   error?: string | null
   updatedAt: string
 }
