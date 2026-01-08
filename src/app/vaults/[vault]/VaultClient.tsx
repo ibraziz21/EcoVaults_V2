@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { ArrowLeftIcon } from '@radix-ui/react-icons'
 import { Card, CardContent } from '@/components/ui/Card'
 import { DepositWithdraw } from '@/components/deposit/deposit-withdraw'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useYields, type YieldSnapshot } from '@/hooks/useYields'
 import { usePositions } from '@/hooks/usePositions'
 import { formatUnits } from 'viem'
@@ -20,6 +20,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { useAccount } from 'wagmi'
+import { useDepositIntents } from '@/hooks/useDepositIntents'
+import { ChevronDown } from 'lucide-react'
 
 // Accept both canonical and alias slugs, normalize for lookups
 const CANONICAL: Record<string, 'USDC' | 'USDT'> = {
@@ -90,6 +92,9 @@ export default function VaultDetailPage() {
   // ── Hooks must always run ──
   const { yields, isLoading, error } = useYields()
   const { data: positionsRaw } = usePositions()
+  const { intents: stuckIntents, isLoading: intentsLoading, refetch: refetchIntents } = useDepositIntents(address)
+  const [showRetries, setShowRetries] = useState(false)
+  const [retryingRefId, setRetryingRefId] = useState<string | null>(null)
 
   // Derive variants using the canonical token (so USDT0/USDCe work)
   const vaultVariants = useMemo(() => {
@@ -176,6 +181,27 @@ export default function VaultDetailPage() {
       s.protocolKey === 'morpho-blue' &&
       (DISPLAY_TOKEN[s.token] ?? s.token) === vaultCanonical
   )
+
+  const handleRetryIntent = async (refId: string) => {
+    if (!refId) return
+    setRetryingRefId(refId)
+    try {
+      const res = await fetch('/api/deposits/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refId }),
+      })
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || 'Retry failed')
+      }
+      await refetchIntents()
+    } catch (err) {
+      console.error('[retry intent]', err)
+    } finally {
+      setRetryingRefId(null)
+    }
+  }
 
   // ── Only rendering branches below this line ──
 
@@ -413,6 +439,60 @@ export default function VaultDetailPage() {
             {/* Right Column - Deposit/Withdraw */}
             <div className="lg:sticky lg:top-6 h-fit">
               {snapCandidate && <DepositWithdraw initialTab="deposit" snap={snapCandidate} />}
+
+              {/* Pending / Failed Deposits (dropdown) */}
+              {address && (
+                <div className="mt-4 border border-border rounded-xl overflow-hidden">
+                  <button
+                    onClick={() => setShowRetries((v) => !v)}
+                    className="w-full px-5 py-4 flex items-center justify-between h-12 bg-muted/30 hover:bg-muted/50 transition"
+                  >
+                    <span className="font-semibold text-foreground text-base">Pending / Failed Deposits</span>
+                    <div className="flex items-center gap-2 text-muted-foreground text-xs">
+                      {intentsLoading && <span>Loading…</span>}
+                      <ChevronDown
+                        size={18}
+                        className={`transition-transform ${showRetries ? 'rotate-180' : ''}`}
+                      />
+                    </div>
+                  </button>
+
+                  {showRetries && (
+                    <div className="divide-y">
+                      {stuckIntents.map((intent) => {
+                        const shortRef = `${intent.refId.slice(0, 6)}…${intent.refId.slice(-4)}`
+                        const status = intent.status?.toUpperCase?.() || 'UNKNOWN'
+                        const isFailed = status === 'FAILED' || !!intent.error
+                        const needsAction = isFailed || status === 'PENDING' || status === 'WAITING_ROUTE'
+                        const label = isFailed ? 'Retry' : needsAction ? 'Continue' : 'Processing…'
+                        const disabled = retryingRefId === intent.refId || (!needsAction && !isFailed)
+                        const btnVariant = isFailed ? 'destructive' : 'secondary'
+
+                        return (
+                          <div key={intent.refId} className="px-5 py-3 flex items-center justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium text-foreground truncate">{shortRef}</div>
+                              <div className="text-xs text-muted-foreground">{status}</div>
+                              {intent.error && <div className="text-xs text-destructive truncate">{intent.error}</div>}
+                            </div>
+                            <Button
+                              size="sm"
+                              variant={btnVariant as any}
+                              disabled={disabled}
+                              onClick={() => handleRetryIntent(intent.refId)}
+                            >
+                              {retryingRefId === intent.refId ? 'Working…' : label}
+                            </Button>
+                          </div>
+                        )
+                      })}
+                      {!intentsLoading && stuckIntents.length === 0 && (
+                        <div className="px-5 py-3 text-sm text-muted-foreground">No pending deposits.</div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -142,6 +142,37 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
   const [routeExpanded, setRouteExpanded] = useState(false);
   const [balanceRefreshTick, setBalanceRefreshTick] = useState(0);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  const [flushPendingDone, setFlushPendingDone] = useState(false);
+
+  // Flush any pending bridge tx hashes saved when modal was closed
+  useEffect(() => {
+    const flush = async () => {
+      try {
+        const raw = localStorage.getItem('ev_pending_bridge');
+        if (!raw) return;
+        const items: any[] = JSON.parse(raw);
+        for (const item of items) {
+          if (!item?.refId || !item?.fromTxHash) continue;
+          await fetch('/api/deposits/route-progress', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              refId: item.refId,
+              fromTxHash: item.fromTxHash,
+              fromChainId: item.fromChainId,
+              toChainId: item.toChainId,
+            }),
+          }).catch(() => {});
+        }
+        localStorage.removeItem('ev_pending_bridge');
+      } catch {
+        // ignore
+      } finally {
+        setFlushPendingDone(true);
+      }
+    };
+    if (!flushPendingDone) flush();
+  }, [flushPendingDone]);
 
   // Success modals
   const [showDepositSuccess, setShowDepositSuccess] = useState(false);
@@ -685,13 +716,15 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
 
   if (!snap) {
     return (
-      <Card className="w-full max-w-2xl mx-auto p-6 shadow-none">
-        <div className="animate-pulse space-y-4">
-          <div className="h-6 w-32 bg-muted rounded" />
-          <div className="h-12 bg-muted rounded" />
-          <div className="h-10 bg-muted rounded" />
-        </div>
-      </Card>
+      <>
+        <Card className="w-full max-w-2xl mx-auto p-6 shadow-none">
+          <div className="animate-pulse space-y-4">
+            <div className="h-6 w-32 bg-muted rounded" />
+            <div className="h-12 bg-muted rounded" />
+            <div className="h-10 bg-muted rounded" />
+          </div>
+        </Card>
+      </>
     );
   }
 
@@ -909,6 +942,7 @@ export function DepositWithdraw({ initialTab = 'deposit', snap }: DepositWithdra
               {switchError && (
                 <p className="text-xs text-destructive text-center mt-2">{switchError}</p>
               )}
+
 
               {/* Routing via LI.FI bridge Section */}
               <div className="border border-border rounded-xl overflow-hidden">

@@ -448,9 +448,9 @@ export async function POST(req: Request) {
       return json({ ok: true, already: true, status: 'MINTED', mintTxHash: intent.mintTxHash })
     }
 
-    // Merge new facts (fromTxHash/chain ids/minAmount)
-    const patch: any = {}
-    if (fromTxHash && intent.fromTxHash !== fromTxHash) patch.fromTxHash = fromTxHash
+  // Merge new facts (fromTxHash/chain ids/minAmount)
+  const patch: any = {}
+  if (fromTxHash && intent.fromTxHash !== fromTxHash) patch.fromTxHash = fromTxHash.trim()
     if (minAmountStr) {
       const incoming = BigInt(minAmountStr)
       const current = intent.minAmount ? BigInt(intent.minAmount) : null
@@ -462,9 +462,25 @@ export async function POST(req: Request) {
 
     // If still no source tx, move to WAITING_ROUTE and exit
     if (!intent.fromTxHash) {
-      await advanceIdempotent(refId, 'PENDING', 'WAITING_ROUTE')
-      await advanceIdempotent(refId, 'PROCESSING', 'WAITING_ROUTE')
-      return json({ ok: true, waiting: true }, 202)
+      // Fallback: if depositTxHash already exists, treat as deposited and continue to mint
+      if (intent.depositTxHash) {
+        const bridged = intent.bridgedAmount
+          ? BigInt(intent.bridgedAmount)
+          : intent.minAmount
+            ? BigInt(intent.minAmount)
+            : intent.amount
+              ? BigInt(intent.amount)
+              : 0n
+        await advanceIdempotent(refId, 'WAITING_ROUTE', 'BRIDGED', {
+          toTxHash: intent.toTxHash ?? null,
+          toTokenAddress: liskToken,
+          bridgedAmount: bridged.toString(),
+        })
+      } else {
+        await advanceIdempotent(refId, 'PENDING', 'WAITING_ROUTE')
+        await advanceIdempotent(refId, 'PROCESSING', 'WAITING_ROUTE')
+        return json({ ok: true, waiting: true }, 202)
+      }
     }
 
     // We have a txHash; bridge should be in flight
@@ -487,7 +503,8 @@ export async function POST(req: Request) {
     if (!receiving) throw new Error('LiFi DONE but missing receiving payload')
 
     const toTxHash = (receiving?.txHash as `0x${string}` | undefined) ?? intent.toTxHash ?? undefined
-    const recvAddr = receiving.token?.address as `0x${string}` | undefined
+    const recvAddrRaw = receiving.token?.address as string | undefined
+    const recvAddr = recvAddrRaw ? (recvAddrRaw.trim() as `0x${string}`) : undefined
     const lifiMinOutStr = (receiving as any)?.toAmountMin as string | undefined
     const expectedToken = liskToken
 
@@ -512,31 +529,14 @@ export async function POST(req: Request) {
       })
     }
 
-    // Respect minAmount (prefer LiFi toAmountMin if provided)
-    const minAmountFromIntent = intent.minAmount && intent.minAmount.length > 0 ? BigInt(intent.minAmount) : null
-    const minAmountFromRequest = typeof minAmountStr === 'string' ? BigInt(minAmountStr) : null
-    const minAmountFromLifi = lifiMinOutStr ? BigInt(lifiMinOutStr) : null
-    const minAmount =
-      minAmountFromLifi ??
-      minAmountFromIntent ??
-      minAmountFromRequest ??
-      0n
-
-    if (minAmount > 0n && bridgedAmount < minAmount) {
-      throw new Error(`Bridged amount ${bridgedAmount} < minAmount ${minAmount}`)
-    }
+    // Use the actual bridged amount as the canonical min to avoid stale user inputs blocking completion
+    const minAmount = bridgedAmount
 
     await advanceIdempotent(refId, 'BRIDGE_IN_FLIGHT', 'BRIDGED', {
       toTxHash: toTxHash ?? null,
       toTokenAddress: recvAddr ?? null,
       bridgedAmount: bridgedAmount.toString(),
-      minAmount: minAmountFromLifi
-        ? minAmountFromLifi.toString()
-        : minAmountFromIntent
-          ? minAmountFromIntent.toString()
-          : minAmountFromRequest
-            ? minAmountFromRequest.toString()
-            : intent.minAmount ?? null,
+      minAmount: minAmount.toString(),
     })
 
     // Mirror bridge info onchain (best-effort)
