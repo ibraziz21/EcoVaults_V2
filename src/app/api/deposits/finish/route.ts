@@ -287,23 +287,53 @@ async function mintReceipt(user: `0x${string}`, amount: bigint, rewardsVault: `0
   return await withMintLock(async () => {
     const { pub, wlt, account } = makeOpClients()
 
-    // Serialize nonce against any in-flight txs from the relayer (recordDeposit)
-    const nonce = await pub.getTransactionCount({
-      address: account.address,
-      blockTag: 'pending',
-    })
+    const bump = (x?: bigint | null) => {
+      if (x == null) return undefined
+      return (x * 12n) / 10n + 1n // +20% and nudge
+    }
 
-    const { request } = await pub.simulateContract({
-      address: rewardsVault,
-      abi: rewardsAbi,
-      functionName: 'recordDeposit',
-      args: [user, amount],
-      account,
-      nonce,
-    })
-    const mintTx = await wlt.writeContract({ ...request, nonce })
-    await pub.waitForTransactionReceipt({ hash: mintTx, confirmations: 3 })
-    return { mintTx }
+    const reserveAndSend = async () => {
+      // Serialize nonce against any in-flight txs from the relayer (recordDeposit)
+      const nonce = await pub.getTransactionCount({
+        address: account.address,
+        blockTag: 'pending',
+      })
+
+      const { request } = await pub.simulateContract({
+        address: rewardsVault,
+        abi: rewardsAbi,
+        functionName: 'recordDeposit',
+        args: [user, amount],
+        account,
+        nonce,
+      })
+      // Remove 'type' property if present, as only 'eip7702' is allowed
+      const { type, ...requestWithoutType } = request as any
+      const mintTx = await wlt.writeContract({
+        ...requestWithoutType,
+        nonce,
+        maxFeePerGas: bump((request as any).maxFeePerGas),
+        maxPriorityFeePerGas: bump((request as any).maxPriorityFeePerGas),
+      })
+      await pub.waitForTransactionReceipt({ hash: mintTx, confirmations: 3 })
+      return { mintTx }
+    }
+
+    try {
+      return await reserveAndSend()
+    } catch (err: any) {
+      const msg = (err?.message || err?.shortMessage || '').toLowerCase()
+      const shouldRetry =
+        msg.includes('nonce too low') ||
+        msg.includes('underpriced') ||
+        msg.includes('replacement transaction') ||
+        msg.includes('fee too low')
+      if (shouldRetry) {
+        console.warn('[mintReceipt] retrying after tx error:', err?.message || err)
+        return await reserveAndSend()
+      }
+      throw err
+    }
   })
 }
 
@@ -458,6 +488,7 @@ export async function POST(req: Request) {
 
     const toTxHash = (receiving?.txHash as `0x${string}` | undefined) ?? intent.toTxHash ?? undefined
     const recvAddr = receiving.token?.address as `0x${string}` | undefined
+    const lifiMinOutStr = (receiving as any)?.toAmountMin as string | undefined
     const expectedToken = liskToken
 
     if (!recvAddr) throw new Error('LiFi DONE but receiving.token.address is empty')
@@ -481,13 +512,15 @@ export async function POST(req: Request) {
       })
     }
 
-    // Respect minAmount
+    // Respect minAmount (prefer LiFi toAmountMin if provided)
+    const minAmountFromIntent = intent.minAmount && intent.minAmount.length > 0 ? BigInt(intent.minAmount) : null
+    const minAmountFromRequest = typeof minAmountStr === 'string' ? BigInt(minAmountStr) : null
+    const minAmountFromLifi = lifiMinOutStr ? BigInt(lifiMinOutStr) : null
     const minAmount =
-      intent.minAmount && intent.minAmount.length > 0
-        ? BigInt(intent.minAmount)
-        : typeof minAmountStr === 'string'
-          ? BigInt(minAmountStr)
-          : 0n
+      minAmountFromLifi ??
+      minAmountFromIntent ??
+      minAmountFromRequest ??
+      0n
 
     if (minAmount > 0n && bridgedAmount < minAmount) {
       throw new Error(`Bridged amount ${bridgedAmount} < minAmount ${minAmount}`)
@@ -497,6 +530,13 @@ export async function POST(req: Request) {
       toTxHash: toTxHash ?? null,
       toTokenAddress: recvAddr ?? null,
       bridgedAmount: bridgedAmount.toString(),
+      minAmount: minAmountFromLifi
+        ? minAmountFromLifi.toString()
+        : minAmountFromIntent
+          ? minAmountFromIntent.toString()
+          : minAmountFromRequest
+            ? minAmountFromRequest.toString()
+            : intent.minAmount ?? null,
     })
 
     // Mirror bridge info onchain (best-effort)
