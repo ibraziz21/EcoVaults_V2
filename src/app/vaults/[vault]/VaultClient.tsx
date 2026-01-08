@@ -447,7 +447,7 @@ export default function VaultDetailPage() {
                     onClick={() => setShowRetries((v) => !v)}
                     className="w-full px-5 py-4 flex items-center justify-between h-12 bg-muted/30 hover:bg-muted/50 transition"
                   >
-                    <span className="font-semibold text-foreground text-base">Pending / Failed Deposits</span>
+                    <span className="font-semibold text-foreground text-base">Resume Deposits</span>
                     <div className="flex items-center gap-2 text-muted-foreground text-xs">
                       {intentsLoading && <span>Loading…</span>}
                       <ChevronDown
