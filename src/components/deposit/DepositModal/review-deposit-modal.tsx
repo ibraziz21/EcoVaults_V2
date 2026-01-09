@@ -487,13 +487,15 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       const user = walletClient.account!.address as `0x${string}`
       const inputAmt = parseUnits(amount || '0', sourceDecimals)
 
-      // 2) Create intent (store refId for retry) unless resuming an existing one
+      // 2) Reuse existing intent if supplied (resume) — never create a new one during retry
       let refId: `0x${string}` | null = (currentRefId ?? resumeRefId ?? null) as `0x${string}` | null
       if (!refId) {
         const created = await createDepositIntent()
         refId = created.refId
+      } else {
+        // Ensure state is aligned with the reused refId so subsequent calls don't recreate
+        setCurrentRefId(refId)
       }
-      setCurrentRefId(refId)
 
       // 3) Fresh quote for minAmount (tolerate by small buffer)
       const quote = await getBridgeQuote({
@@ -519,17 +521,17 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
           if (hash && !bridgeTxHash) setBridgeTxHash(hash)
           if (hash) {
             setLastFromTxHash(hash)
-            // Persist immediately so retries have the tx hash even if modal closes
-            void fetch('/api/deposits/route-progress', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                refId,
-                fromTxHash: hash,
-                fromChainId: optimismChainId,
-                toChainId: liskChainId,
-              }),
-            }).catch(() => {})
+        // Persist immediately so retries have the tx hash even if modal closes
+        void fetch('/api/deposits/route-progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            refId,
+            fromTxHash: hash,
+            fromChainId: optimismChainId,
+            toChainId: liskChainId,
+          }),
+        }).catch(() => {})
             try {
               const existingRaw = localStorage.getItem('ev_pending_bridge')
               const existing = existingRaw ? (JSON.parse(existingRaw) as any[]) : []

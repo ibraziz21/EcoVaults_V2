@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/tooltip"
 import { useAccount } from 'wagmi'
 import { useDepositIntents } from '@/hooks/useDepositIntents'
+import { useWithdrawIntents } from '@/hooks/useWithdrawIntents'
 import { ChevronDown } from 'lucide-react'
 
 // Accept both canonical and alias slugs, normalize for lookups
@@ -93,9 +94,17 @@ export default function VaultDetailPage() {
   const { yields, isLoading, error } = useYields()
   const { data: positionsRaw } = usePositions()
   const { intents: stuckIntents, isLoading: intentsLoading, refetch: refetchIntents } = useDepositIntents(address)
+  const {
+    intents: stuckWithdraws,
+    isLoading: withdrawsLoading,
+    refetch: refetchWithdraws,
+  } = useWithdrawIntents(address)
   const [showRetries, setShowRetries] = useState(false)
+  const [showWithdrawRetries, setShowWithdrawRetries] = useState(false)
+  const [showActive, setShowActive] = useState(false)
   const [retryingRefId, setRetryingRefId] = useState<string | null>(null)
   const [resumeRequest, setResumeRequest] = useState<{ amountBase: string; refId?: string } | null>(null)
+  const [retryingWithdrawId, setRetryingWithdrawId] = useState<string | null>(null)
 
   // Derive variants using the canonical token (so USDT0/USDCe work)
   const vaultVariants = useMemo(() => {
@@ -201,6 +210,27 @@ export default function VaultDetailPage() {
       console.error('[retry intent]', err)
     } finally {
       setRetryingRefId(null)
+    }
+  }
+
+  const handleRetryWithdraw = async (refId: string) => {
+    if (!refId) return
+    setRetryingWithdrawId(refId)
+    try {
+      const res = await fetch('/api/withdraw/finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refId }),
+      })
+      const json = await res.json().catch(() => null)
+      if (!res.ok || !json?.ok) {
+        throw new Error(json?.error || 'Retry failed')
+      }
+      await refetchWithdraws()
+    } catch (err) {
+      console.error('[retry withdraw]', err)
+    } finally {
+      setRetryingWithdrawId(null)
     }
   }
 
@@ -448,72 +478,141 @@ export default function VaultDetailPage() {
                 />
               )}
 
-              {/* Pending / Failed Deposits (dropdown) */}
+              {/* Active transactions: deposits + withdrawals */}
               {address && (
                 <div className="mt-4 border border-border rounded-xl overflow-hidden">
                   <button
-                    onClick={() => setShowRetries((v) => !v)}
+                    onClick={() => setShowActive((v) => !v)}
                     className="w-full px-5 py-4 flex items-center justify-between h-12 bg-muted/30 hover:bg-muted/50 transition"
                   >
-                    <span className="font-semibold text-foreground text-base">Resume Deposits</span>
-                    <div className="flex items-center gap-2 text-muted-foreground text-xs">
-                      {intentsLoading && <span>Loading…</span>}
-                      <ChevronDown
-                        size={18}
-                        className={`transition-transform ${showRetries ? 'rotate-180' : ''}`}
-                      />
-                    </div>
+                    <span className="font-semibold text-foreground text-base">Active Transactions</span>
+                    <ChevronDown
+                      size={18}
+                      className={`transition-transform ${showActive ? 'rotate-180' : ''}`}
+                    />
                   </button>
 
-                  {showRetries && (
+                  {showActive && (
                     <div className="divide-y">
-                      {stuckIntents.map((intent) => {
-                      const shortRef = `${intent.refId.slice(0, 6)}…${intent.refId.slice(-4)}`
-                      const status = intent.status?.toUpperCase?.() || 'UNKNOWN'
-                      const isFailed = status === 'FAILED' || !!intent.error
-                      const needsAction = isFailed || status === 'PENDING' || status === 'WAITING_ROUTE'
-                      const label = isFailed ? 'Retry' : needsAction ? 'Continue' : 'Processing…'
-                        const disabled = retryingRefId === intent.refId || (!needsAction && !isFailed)
-                        const btnVariant = isFailed ? 'destructive' : 'secondary'
+                      <div className="border-t border-border">
+                        <button
+                          onClick={() => setShowRetries((v) => !v)}
+                          className="w-full px-5 py-4 flex items-center justify-between h-12 bg-muted/20 hover:bg-muted/40 transition"
+                        >
+                          <span className="font-semibold text-foreground text-base">Resume Deposits</span>
+                          <div className="flex items-center gap-2 text-muted-foreground text-xs">
+                            {intentsLoading && <span>Loading…</span>}
+                            <ChevronDown
+                              size={18}
+                              className={`transition-transform ${showRetries ? 'rotate-180' : ''}`}
+                            />
+                          </div>
+                        </button>
 
-                        const hasBridge = intent.fromTxHash && intent.fromTxHash.trim().length > 0
-                        const hasDeposit = intent.depositTxHash && intent.depositTxHash.trim().length > 0
-                        const canResumeBridge = !hasBridge && !hasDeposit
-                        const showRetry = hasBridge || hasDeposit
-                        const baseAmount = intent.amount || intent.minAmount || '0'
-                        const canResume = canResumeBridge && BigInt(baseAmount || '0') > 0n
+                        {showRetries && (
+                          <div className="divide-y">
+                            {stuckIntents.map((intent) => {
+                            const shortRef = `${intent.refId.slice(0, 6)}…${intent.refId.slice(-4)}`
+                            const status = intent.status?.toUpperCase?.() || 'UNKNOWN'
+                            const isFailed = status === 'FAILED' || !!intent.error
+                            const needsAction = isFailed || status === 'PENDING' || status === 'WAITING_ROUTE'
+                            const label = isFailed ? 'Retry' : needsAction ? 'Continue' : 'Processing…'
+                              const disabled = retryingRefId === intent.refId || (!needsAction && !isFailed)
+                              const btnVariant = isFailed ? 'destructive' : 'secondary'
 
-                        return (
-                          <div key={intent.refId} className="px-5 py-3 flex items-center justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="text-sm font-medium text-foreground truncate">{shortRef}</div>
-                              <div className="text-xs text-muted-foreground">{status}</div>
-                              {intent.error && <div className="text-xs text-destructive truncate">{intent.error}</div>}
-                            </div>
-                            {canResume ? (
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                onClick={() => setResumeRequest({ amountBase: baseAmount, refId: intent.refId })}
-                              >
-                                Start Bridge
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant={btnVariant as any}
-                                disabled={disabled}
-                                onClick={() => handleRetryIntent(intent.refId)}
-                              >
-                                {retryingRefId === intent.refId ? 'Working…' : label}
-                              </Button>
+                              const hasBridge = intent.fromTxHash && intent.fromTxHash.trim().length > 0
+                              const hasDeposit = intent.depositTxHash && intent.depositTxHash.trim().length > 0
+                              const canResumeBridge = !hasBridge && !hasDeposit
+                              const baseAmount = intent.amount || intent.minAmount || '0'
+                              const canResume = canResumeBridge && BigInt(baseAmount || '0') > 0n
+
+                              return (
+                                <div key={intent.refId} className="px-5 py-3 flex items-center justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-medium text-foreground truncate">{shortRef}</div>
+                                    <div className="text-xs text-muted-foreground">{status}</div>
+                                    {intent.error && <div className="text-xs text-destructive truncate">{intent.error}</div>}
+                                  </div>
+                                  {canResume ? (
+                                    <Button
+                                      size="sm"
+                                      variant="secondary"
+                                      onClick={() => setResumeRequest({ amountBase: baseAmount, refId: intent.refId })}
+                                    >
+                                      Start Bridge
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      size="sm"
+                                      variant={btnVariant as any}
+                                      disabled={disabled}
+                                      onClick={() => handleRetryIntent(intent.refId)}
+                                    >
+                                      {retryingRefId === intent.refId ? 'Working…' : label}
+                                    </Button>
+                                  )}
+                               </div>
+                             )
+                            })}
+                            {!intentsLoading && stuckIntents.length === 0 && (
+                              <div className="px-5 py-3 text-sm text-muted-foreground">No pending deposits.</div>
                             )}
-                         </div>
-                       )
-                      })}
-                      {!intentsLoading && stuckIntents.length === 0 && (
-                        <div className="px-5 py-3 text-sm text-muted-foreground">No pending deposits.</div>
-                      )}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="border-t border-border">
+                        <button
+                          onClick={() => setShowWithdrawRetries((v) => !v)}
+                          className="w-full px-5 py-4 flex items-center justify-between h-12 bg-muted/20 hover:bg-muted/40 transition"
+                        >
+                          <span className="font-semibold text-foreground text-base">Resume Withdrawals</span>
+                          <div className="flex items-center gap-2 text-muted-foreground text-xs">
+                            {withdrawsLoading && <span>Loading…</span>}
+                            <ChevronDown
+                              size={18}
+                              className={`transition-transform ${showWithdrawRetries ? 'rotate-180' : ''}`}
+                            />
+                          </div>
+                        </button>
+
+                        {showWithdrawRetries && (
+                          <div className="divide-y">
+                            {stuckWithdraws.map((intent) => {
+                              const shortRef = `${intent.refId.slice(0, 6)}…${intent.refId.slice(-4)}`
+                              const status = intent.status?.toUpperCase?.() || 'UNKNOWN'
+                              const isFailed = status === 'FAILED' || !!intent.error
+                              const needsAction =
+                                isFailed ||
+                                ['PENDING', 'PROCESSING', 'BURNED', 'REDEEMING', 'REDEEMED', 'BRIDGING'].includes(status)
+                              const label = isFailed ? 'Retry' : needsAction ? 'Continue' : 'Processing…'
+                              const disabled = retryingWithdrawId === intent.refId || (!needsAction && !isFailed)
+                              const btnVariant = isFailed ? 'destructive' : 'secondary'
+
+                              return (
+                                <div key={intent.refId} className="px-5 py-3 flex items-center justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-medium text-foreground truncate">{shortRef}</div>
+                                    <div className="text-xs text-muted-foreground">{status}</div>
+                                    {intent.error && <div className="text-xs text-destructive truncate">{intent.error}</div>}
+                                  </div>
+                                  <Button
+                                    size="sm"
+                                    variant={btnVariant as any}
+                                    disabled={disabled}
+                                    onClick={() => handleRetryWithdraw(intent.refId)}
+                                  >
+                                    {retryingWithdrawId === intent.refId ? 'Working…' : label}
+                                  </Button>
+                                </div>
+                              )
+                            })}
+                            {!withdrawsLoading && stuckWithdraws.length === 0 && (
+                              <div className="px-5 py-3 text-sm text-muted-foreground">No pending withdrawals.</div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
