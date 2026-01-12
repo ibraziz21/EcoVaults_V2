@@ -1,0 +1,12 @@
+
+{
+    "name": "Super Chain Vaults",
+    "description": "EcoVaults dApp for Super Chain Vaults.",
+    "icons": [
+      {
+        "src":"/next.svg",
+        "type": "image/svg+xml",
+        "sizes": "any"
+      }
+    ]
+  }
