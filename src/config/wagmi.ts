@@ -24,7 +24,13 @@ export const wagmiConfig = createConfig({
 
   connectors: [
     safe({
-      allowedDomains: [/app\.safe\.global$/, /.*\.safe\.global$/],
+      // Accept all Safe hosts we use (main + OP hosts)
+      allowedDomains: [
+        /app\.safe\.global$/,
+        /.*\.safe\.global$/,
+        /safe\.optimism\.io$/,
+        /.*\.safe\.optimism\.io$/,
+      ],
     }),
     ...(wcProjectId
       ? [walletConnect({ projectId: wcProjectId, showQrModal: true })]
