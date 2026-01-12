@@ -30,6 +30,8 @@ export const wagmiConfig = createConfig({
         /.*\.safe\.global$/,
         /safe\.optimism\.io$/,
         /.*\.safe\.optimism\.io$/,
+        /account\.superchain\.eco$/,
+        /.*\.superchain\.eco$/,
       ],
     }),
     ...(wcProjectId
