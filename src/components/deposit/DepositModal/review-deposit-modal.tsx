@@ -896,7 +896,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
                           ? 'Bridge transaction confirmed'
                           : bridgeSubmitted
                             ? 'Bridging…'
-                            : 'Sign bridge transaction'}
+                            : 'Bridging'}
                     </div>
 
                     {/* Explorer link ONLY once bridge is complete */}
