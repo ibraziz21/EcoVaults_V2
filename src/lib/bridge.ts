@@ -198,6 +198,11 @@ export async function bridgeTokens(
   })
 
   const route = convertQuoteToRoute(quote)
+  const routeId = (route as any)?.id ?? (quote as any)?.id
+  console.log('[bridgeTokens] routeId', routeId, {
+    quoteId: (quote as any)?.id,
+    routeIdFromRoute: (route as any)?.id,
+  })
 
   let lastTxHash: `0x${string}` | undefined
 
@@ -230,6 +235,7 @@ export async function bridgeTokens(
 
   return {
     route: executed,
+    routeId,
     txHash: lastTxHash,
   }
 }

@@ -51,7 +51,7 @@ model DepositIntent {
 
   // ── Misc ───────────────────────────────────────────────────
   intentToken     String?        // short-lived secret returned by create-intent
-
+  routeId         String?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
@@ -90,4 +90,43 @@ model WithdrawIntent {
 
   @@index([user])
   @@unique([user, nonce])
+}
+
+model RewardsSweepRun {
+  id                   String   @id @default(cuid())
+  safeAddress          String
+  chainIdFrom          Int
+  chainIdTo            Int
+
+  status               String   // PENDING|CLAIMING|CLAIMED|BRIDGING|BRIDGED|FUNDING|DONE|FAILED|NOOP
+  error                String?
+
+  // lease / single flight
+  processingOwner      String?
+  processingLeaseUntil DateTime?
+
+  // accounting (stringified bigint base units)
+  thresholdLsk         String?
+  claimableLsk         String?
+  claimedLsk           String?
+  bridgedUsdt          String?
+  bridgedAmount        String?
+  bridgedTokenSymbol   String?
+
+  // tx hashes
+  claimTxHash          String?
+  bridgeFromTxHash     String?
+  bridgeToTxHash       String?
+  fundTxHash           String?
+
+  // attempts
+  bridgeAttempts       Int      @default(0)
+  fundAttempts         Int      @default(0)
+
+  // timestamps
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([safeAddress, status])
+  @@index([processingLeaseUntil])
 }

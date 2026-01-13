@@ -41,6 +41,7 @@ type Body = {
   refId: `0x${string}`
   fromTxHash?: `0x${string}` | null
   toTxHash?: `0x${string}` | null
+  routeId?: string | null
   fromChainId?: number | null
   toChainId?: number | null
   toAddress?: `0x${string}` | null
@@ -100,6 +101,11 @@ export async function POST(req: Request) {
 
     if (b.toTokenSymbol) {
       immutableGuard('toTokenSymbol', b.toTokenSymbol)
+    }
+
+    // RouteId persistence (for later hash polling)
+    if (b.routeId && b.routeId.trim()) {
+      if (!intent.routeId) data.routeId = b.routeId.trim()
     }
 
     // ── Source tx: store immediately (may be pending; avoid 422s) ─

@@ -511,6 +511,65 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
       const minOut = rawMinOut > 0n ? rawMinOut - 10n : 0n
       console.info(TAG, 'bridge quote', { minOut: minOut.toString(), quote })
 
+      // Persist routeId early if present
+      let routeId = (quote as any)?.id ?? (quote as any)?.raw?.id ?? null
+      if (routeId) {
+        console.log('[deposit modal] routeId from quote', routeId)
+        void fetch('/api/deposits/route-progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            refId,
+            routeId,
+            fromChainId: optimismChainId,
+            toChainId: liskChainId,
+          }),
+        }).catch(() => {})
+      } else {
+        console.warn('[deposit modal] no routeId returned from quote', quote)
+      }
+
+      // Helper to persist fromTxHash robustly
+      const persistFromTxHash = async (hash: `0x${string}`) => {
+        if (!hash) return
+        setLastFromTxHash(hash)
+        const payload = {
+          refId,
+          fromTxHash: hash,
+          fromChainId: optimismChainId,
+          toChainId: liskChainId,
+          routeId,
+        }
+        // try twice best-effort
+        const attempt = async () => {
+          const res = await fetch('/api/deposits/route-progress', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          })
+          if (!res.ok) throw new Error(`route-progress ${res.status}`)
+        }
+        try {
+          await attempt()
+        } catch (e) {
+          try {
+            await attempt()
+          } catch (err) {
+            console.warn(TAG, 'route-progress persist failed (non-fatal)', err)
+          }
+        }
+        // local backup
+        try {
+          const existingRaw = localStorage.getItem('ev_pending_bridge')
+          const existing = existingRaw ? (JSON.parse(existingRaw) as any[]) : []
+          const updated = [
+            ...existing.filter((e) => e?.refId !== refId),
+            { refId, fromTxHash: hash, fromChainId: optimismChainId, toChainId: liskChainId, routeId },
+          ]
+          localStorage.setItem('ev_pending_bridge', JSON.stringify(updated))
+        } catch {}
+      }
+
       // 4) Execute bridge OP → Lisk (bridge util should route to relayer on Lisk)
       const bridgeResult = await bridgeTokens(destTokenLabel, inputAmt, 'optimism', 'lisk', walletClient, {
         sourceToken: sourceSymbol,
@@ -520,27 +579,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
 
           if (hash && !bridgeTxHash) setBridgeTxHash(hash)
           if (hash) {
-            setLastFromTxHash(hash)
-        // Persist immediately so retries have the tx hash even if modal closes
-        void fetch('/api/deposits/route-progress', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            refId,
-            fromTxHash: hash,
-            fromChainId: optimismChainId,
-            toChainId: liskChainId,
-          }),
-        }).catch(() => {})
-            try {
-              const existingRaw = localStorage.getItem('ev_pending_bridge')
-              const existing = existingRaw ? (JSON.parse(existingRaw) as any[]) : []
-              const updated = [
-                ...existing.filter((e) => e?.refId !== refId),
-                { refId, fromTxHash: hash, fromChainId: optimismChainId, toChainId: liskChainId },
-              ]
-              localStorage.setItem('ev_pending_bridge', JSON.stringify(updated))
-            } catch {}
+            void persistFromTxHash(hash)
           }
 
           // Once the route is submitted, hide the “Approve…” sub-step and show progress
@@ -550,29 +589,26 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
           if (hash) setBridgeSubmitted(true)
         },
       })
-
-      const fromTxHash: `0x${string}` | undefined = bridgeResult?.txHash ?? bridgeTxHash ?? undefined
-      if (fromTxHash) {
-        // Persist immediately after bridge result as well (in case onUpdate missed)
+      // Persist routeId from executed route if we didn't have one
+      if (!routeId && bridgeResult?.routeId) {
+        routeId = bridgeResult.routeId
+        console.log('[deposit modal] routeId from bridge execution', routeId)
         void fetch('/api/deposits/route-progress', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             refId,
-            fromTxHash,
+            routeId,
             fromChainId: optimismChainId,
             toChainId: liskChainId,
           }),
         }).catch(() => {})
-        try {
-          const existingRaw = localStorage.getItem('ev_pending_bridge')
-          const existing = existingRaw ? (JSON.parse(existingRaw) as any[]) : []
-          const updated = [
-            ...existing.filter((e) => e?.refId !== refId),
-            { refId, fromTxHash, fromChainId: optimismChainId, toChainId: liskChainId },
-          ]
-          localStorage.setItem('ev_pending_bridge', JSON.stringify(updated))
-        } catch {}
+      }
+
+      const fromTxHash: `0x${string}` | undefined = bridgeResult?.txHash ?? bridgeTxHash ?? undefined
+      if (fromTxHash) {
+        // Persist immediately after bridge result as well (in case onUpdate missed)
+        await persistFromTxHash(fromTxHash)
       }
       if (!fromTxHash) throw new Error('Bridge executed but no txHash was captured from LiFi route')
       setBlockLeaving(false)
