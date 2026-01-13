@@ -718,7 +718,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
           : step === 'bridging'
             ? bridgeSubmitted
               ? 'Bridging…'
-              : 'Sign bridge transaction…'
+              : 'Bridging...'
             : step === 'depositing'
               ? 'Depositing…'
               : step === 'success'
