@@ -627,32 +627,29 @@ export function DepositWithdraw({ initialTab = 'deposit', snap, resumeDeposit, o
     }
   }, [amount]);
 
-  const availableTokens: Token[] = [
-    {
-      id: 'usdc',
-      name: 'USD Coin',
-      symbol: 'USDC',
-      icon: '/tokens/usdc-icon.png',
-      balance: availableTokenBalances.USDC_Op,
-      address: TokenAddresses.USDC.optimism as `0x${string}`,
-    },
-    {
-      id: 'usdt',
-      name: 'Tether USD',
-      symbol: 'USDT',
-      icon: '/tokens/usdt-icon.png',
-      balance: availableTokenBalances.USDT_Op,
-      address: TokenAddresses.USDT.optimism as `0x${string}`,
-    },
-    {
-      id: 'usdt0_op',
-      name: 'USDT0',
-      symbol: 'USDT0',
-      icon: '/tokens/usdt0-icon.png',
-      balance: availableTokenBalances.USDT0_OP,
-      address: TokenAddresses.USDT0.optimism as `0x${string}`,
-    },
-  ];
+  // Restrict source token by destination vault: USDC -> USDC.e, USDT -> USDT0
+  const availableTokens: Token[] =
+    destTokenLabel === 'USDT0'
+      ? [
+          {
+            id: 'usdt',
+            name: 'Tether USD',
+            symbol: 'USDT',
+            icon: '/tokens/usdt-icon.png',
+            balance: availableTokenBalances.USDT_Op,
+            address: TokenAddresses.USDT.optimism as `0x${string}`,
+          },
+        ]
+      : [
+          {
+            id: 'usdc',
+            name: 'USD Coin',
+            symbol: 'USDC',
+            icon: '/tokens/usdc-icon.png',
+            balance: availableTokenBalances.USDC_Op,
+            address: TokenAddresses.USDC.optimism as `0x${string}`,
+          },
+        ];
 
   const withdrawChoices = useMemo(() => {
     const isUSDT = destTokenLabel === 'USDT0';
@@ -670,8 +667,16 @@ export function DepositWithdraw({ initialTab = 'deposit', snap, resumeDeposit, o
 
   const currentWithdrawChoice = withdrawChoices[0];
 
+  // Keep selection aligned to allowed token for the vault
+  useEffect(() => {
+    const shouldBe = destTokenLabel === 'USDT0' ? 'usdt' : 'usdc';
+    if (selectedToken.id !== shouldBe) {
+      setSelectedToken(availableTokens[0]);
+    }
+  }, [destTokenLabel, selectedToken.id, availableTokens]);
+
   const sourceSymbolForModal: 'USDC' | 'USDT' | 'USDCe' | 'USDT0' =
-    selectedToken.id === 'usdt0_op' ? 'USDT0' : selectedToken.id === 'usdt' ? 'USDT' : 'USDC';
+    selectedToken.id === 'usdt' ? 'USDT' : 'USDC';
 
   // Disclaimer check
   const requiresDisclaimer = activeTab === 'deposit' && amountNum >= 1000;
@@ -872,31 +877,27 @@ export function DepositWithdraw({ initialTab = 'deposit', snap, resumeDeposit, o
               )}
 
               {activeTab === 'deposit' ? (
-                <button
-                  onClick={() => setShowTokenModal(true)}
-                  className=" cursor-pointer flex items-center gap-2.5 bg-background rounded-xl hover:bg-muted/50 transition-colors border border-border px-3 py-2"
-                >
-                  <div className="relative">
+              <div className="cursor-default flex items-center gap-2.5 bg-background rounded-xl border border-border px-3 py-2">
+                <div className="relative">
+                  <Image
+                    src={selectedToken.icon}
+                    alt={selectedToken.symbol}
+                    width={24}
+                    height={24}
+                    className="rounded-full"
+                  />
+                  <div className="absolute -bottom-0.5 -right-2 rounded-sm border-2 border-background">
                     <Image
-                      src={selectedToken.icon}
-                      alt={selectedToken.symbol}
-                      width={24}
-                      height={24}
-                      className="rounded-full"
+                      src="/networks/op-icon.png"
+                      alt="OP Mainnet"
+                      width={12}
+                      height={12}
+                      className="rounded-sm"
                     />
-                    <div className="absolute -bottom-0.5 -right-2 rounded-sm border-2 border-background">
-                      <Image
-                        src="/networks/op-icon.png"
-                        alt="OP Mainnet"
-                        width={12}
-                        height={12}
-                        className="rounded-sm"
-                      />
-                    </div>
                   </div>
-                  <span className="font-semibold text-base">{selectedToken.symbol}</span>
-                  <ChevronDown size={18} className="text-muted-foreground" />
-                </button>
+                </div>
+                <span className="font-semibold text-base">{selectedToken.symbol}</span>
+              </div>
               ) : (
                 <div className="relative">
                   <button

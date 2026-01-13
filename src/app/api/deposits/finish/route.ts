@@ -451,20 +451,20 @@ export async function POST(req: Request) {
   // Merge new facts (fromTxHash/chain ids/minAmount)
   const patch: any = {}
   if (fromTxHash && intent.fromTxHash !== fromTxHash) patch.fromTxHash = fromTxHash.trim()
-    if (minAmountStr) {
-      const incoming = BigInt(minAmountStr)
-      const current = intent.minAmount ? BigInt(intent.minAmount) : null
-      if (current === null || incoming < current) patch.minAmount = incoming.toString()
-    }
+  if (minAmountStr) {
+    const incoming = BigInt(minAmountStr)
+    const current = intent.minAmount ? BigInt(intent.minAmount) : null
+    if (current === null || incoming < current) patch.minAmount = incoming.toString()
+  }
     if (Object.keys(patch).length) {
       intent = await prisma.depositIntent.update({ where: { refId }, data: patch })
     }
 
-    // If still no source tx, move to WAITING_ROUTE and exit
-    if (!intent.fromTxHash) {
-      // Fallback: if depositTxHash already exists, treat as deposited and continue to mint
-      if (intent.depositTxHash) {
-        const bridged = intent.bridgedAmount
+  // If still no source tx, move to WAITING_ROUTE and exit
+  if (!intent.fromTxHash) {
+    // Fallback: if depositTxHash already exists, treat as deposited and continue to mint
+    if (intent.depositTxHash) {
+      const bridged = intent.bridgedAmount
           ? BigInt(intent.bridgedAmount)
           : intent.minAmount
             ? BigInt(intent.minAmount)
@@ -476,12 +476,12 @@ export async function POST(req: Request) {
           toTokenAddress: liskToken,
           bridgedAmount: bridged.toString(),
         })
-      } else {
-        await advanceIdempotent(refId, 'PENDING', 'WAITING_ROUTE')
-        await advanceIdempotent(refId, 'PROCESSING', 'WAITING_ROUTE')
-        return json({ ok: true, waiting: true }, 202)
-      }
+    } else {
+      await advanceIdempotent(refId, 'PENDING', 'WAITING_ROUTE')
+      await advanceIdempotent(refId, 'PROCESSING', 'WAITING_ROUTE')
+      return json({ ok: true, waiting: true }, 202)
     }
+  }
 
     // We have a txHash; bridge should be in flight
     await advanceIdempotent(refId, 'WAITING_ROUTE', 'BRIDGE_IN_FLIGHT')

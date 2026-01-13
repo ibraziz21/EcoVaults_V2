@@ -105,37 +105,39 @@ export async function POST(req: Request) {
     // ── Source tx: store immediately (may be pending; avoid 422s) ─
     if (b.fromTxHash) {
       const incomingHash = b.fromTxHash.trim().toLowerCase() as `0x${string}`
-
-      // If an intent already has a different hash, do not fail; just acknowledge
-      if (intent.fromTxHash && intent.fromTxHash.trim().toLowerCase() !== incomingHash) {
-        console.warn('[route-progress] fromTxHash already set, ignoring new value', {
-          existing: intent.fromTxHash,
-          incoming: incomingHash,
-        })
+      if (!incomingHash || incomingHash.length < 10) {
+        console.warn('[route-progress] empty/short fromTxHash ignored')
       } else {
-        data.fromTxHash = incomingHash
-      }
-
-      const srcId = b.fromChainId ?? intent.fromChainId
-      if (!srcId) return bad('fromChainId required with fromTxHash')
-
-      immutableGuard('fromChainId', srcId)
-
-      // Do not block on chain lookups; hash may still be pending when UI calls us
-      // Best effort: if found, we could validate sender, but never throw on miss
-      try {
-        const client = clientFor(srcId)
-        const rcp = await client.getTransactionReceipt({ hash: b.fromTxHash })
-        const txFrom = rcp.from?.toLowerCase?.()
-        if (txFrom && txFrom !== intent.user.toLowerCase()) {
-          console.warn('[route-progress] fromTx sender mismatch with intent.user', { txFrom, user: intent.user })
+        // If an intent already has a different hash, do not fail; just acknowledge
+        if (intent.fromTxHash && intent.fromTxHash.trim().toLowerCase() !== incomingHash) {
+          console.warn('[route-progress] fromTxHash already set, ignoring new value', {
+            existing: intent.fromTxHash,
+            incoming: incomingHash,
+          })
+        } else {
+          data.fromTxHash = incomingHash
         }
-      } catch (e) {
-        console.warn('[route-progress] tx receipt not yet available (non-fatal)', (e as any)?.message || e)
-      }
 
-      // Status bump: PENDING -> WAITING_ROUTE to align with finish flow
-      if (intent.status === 'PENDING') data.status = 'WAITING_ROUTE'
+        const srcId = b.fromChainId ?? intent.fromChainId
+        if (srcId) {
+          immutableGuard('fromChainId', srcId)
+
+          // Do not block on chain lookups; hash may still be pending when UI calls us
+          try {
+            const client = clientFor(srcId)
+            const rcp = await client.getTransactionReceipt({ hash: incomingHash })
+            const txFrom = rcp.from?.toLowerCase?.()
+            if (txFrom && txFrom !== intent.user.toLowerCase()) {
+              console.warn('[route-progress] fromTx sender mismatch with intent.user', { txFrom, user: intent.user })
+            }
+          } catch (e) {
+            console.warn('[route-progress] tx receipt not yet available (non-fatal)', (e as any)?.message || e)
+          }
+        }
+
+        // Status bump: PENDING -> WAITING_ROUTE to align with finish flow
+        if (intent.status === 'PENDING') data.status = 'WAITING_ROUTE'
+      }
     }
 
     // ── Destination tx hash: set immutably and bump status ────
