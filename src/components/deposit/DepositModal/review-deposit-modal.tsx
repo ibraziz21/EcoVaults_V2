@@ -529,7 +529,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
         console.warn('[deposit modal] no routeId returned from quote', quote)
       }
 
-      // Helper to persist fromTxHash robustly
+      // Helper to persist fromTxHash robustly and notify parent
       const persistFromTxHash = async (hash: `0x${string}`) => {
         if (!hash) return
         setLastFromTxHash(hash)
@@ -540,7 +540,16 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
           toChainId: liskChainId,
           routeId,
         }
-        // try twice best-effort
+        // notify parent (for double-commit) immediately
+        try {
+          window.dispatchEvent(
+            new CustomEvent('ev:bridge-txhash', {
+              detail: payload,
+            }),
+          )
+        } catch {}
+
+        // try twice best-effort to persist server-side
         const attempt = async () => {
           const res = await fetch('/api/deposits/route-progress', {
             method: 'POST',
@@ -552,12 +561,11 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
         try {
           await attempt()
         } catch (e) {
-          try {
-            await attempt()
-          } catch (err) {
+          await attempt().catch((err) => {
             console.warn(TAG, 'route-progress persist failed (non-fatal)', err)
-          }
+          })
         }
+
         // local backup
         try {
           const existingRaw = localStorage.getItem('ev_pending_bridge')
@@ -579,6 +587,7 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
 
           if (hash && !bridgeTxHash) setBridgeTxHash(hash)
           if (hash) {
+            // Ensure persistence before continuing
             void persistFromTxHash(hash)
           }
 
@@ -589,6 +598,8 @@ export const DepositModal: FC<ReviewDepositModalProps> = (props) => {
           if (hash) setBridgeSubmitted(true)
         },
       })
+      console.log("Tx Hash Before updating: ", bridgeResult.txHash)
+      
       // Persist routeId from executed route if we didn't have one
       if (!routeId && bridgeResult?.routeId) {
         routeId = bridgeResult.routeId

@@ -208,6 +208,34 @@ export async function POST(req: Request) {
       return bad('Row has invalid addresses; recreate intent', 400)
     }
 
+    // tryLock may have reset a stale BURNED/REDEEMED state back to PROCESSING.
+    // Restore to the furthest state supported by on-chain evidence so the
+    // advanceWithdraw guards in each step don't fail.
+    if (row.status === 'PROCESSING') {
+      let restoredStatus: string | null = null
+      if (row.redeemTxHash && row.fromTxHash) restoredStatus = 'BRIDGING'
+      else if (row.redeemTxHash) restoredStatus = 'REDEEMED'
+      else if (row.burnTxHash) restoredStatus = 'BURNED'
+
+      if (restoredStatus) {
+        await prisma.withdrawIntent.updateMany({
+          where: { refId, status: 'PROCESSING' },
+          data: { status: restoredStatus, updatedAt: new Date() },
+        })
+        row = await prisma.withdrawIntent.findUnique({ where: { refId } })
+        if (!row) return bad('Intent disappeared during state restore', 500)
+        console.log('[withdraw/finish] restored state after tryLock reset', {
+          refId,
+          from: 'PROCESSING',
+          to: restoredStatus,
+        })
+      }
+    }
+
+    // TypeScript can't narrow across the if-block boundary above; row is guaranteed
+    // non-null here because we return early if findUnique returns null.
+    if (!row) return bad('Intent not found after state restore', 500)
+
     const user = row.user as Address
     const dstToken = row.dstToken as `0x${string}`
 

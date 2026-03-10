@@ -187,35 +187,90 @@ export function DepositWithdraw({ initialTab = 'deposit', snap, resumeDeposit, o
     }
   }, [resumeDeposit, snap, tokenDecimals, onResumeHandled]);
 
-  // Flush any pending bridge tx hashes saved when modal was closed
+  // Flush any pending bridge tx hashes saved when modal was closed (interval for robustness)
   useEffect(() => {
-    const flush = async () => {
+    let attempts = 0;
+    const maxAttempts = 12; // ~60s at 5s interval
+
+    const flushOnce = async () => {
       try {
         const raw = localStorage.getItem('ev_pending_bridge');
         if (!raw) return;
         const items: any[] = JSON.parse(raw);
+        const remaining: any[] = [];
         for (const item of items) {
           if (!item?.refId || !item?.fromTxHash) continue;
-          await fetch('/api/deposits/route-progress', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              refId: item.refId,
-              fromTxHash: item.fromTxHash,
-              fromChainId: item.fromChainId,
-              toChainId: item.toChainId,
-            }),
-          }).catch(() => {});
+          try {
+            await fetch('/api/deposits/route-progress', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                refId: item.refId,
+                fromTxHash: item.fromTxHash,
+                fromChainId: item.fromChainId,
+                toChainId: item.toChainId,
+                routeId: item.routeId,
+              }),
+            });
+          } catch {
+            remaining.push(item);
+          }
         }
-        localStorage.removeItem('ev_pending_bridge');
+        if (remaining.length === 0) {
+          localStorage.removeItem('ev_pending_bridge');
+        } else {
+          localStorage.setItem('ev_pending_bridge', JSON.stringify(remaining));
+        }
       } catch {
         // ignore
       } finally {
         setFlushPendingDone(true);
       }
     };
-    if (!flushPendingDone) flush();
-  }, [flushPendingDone]);
+
+    // run immediately
+    flushOnce();
+    const timer = setInterval(() => {
+      attempts += 1;
+      if (attempts >= maxAttempts) {
+        clearInterval(timer);
+        return;
+      }
+      flushOnce();
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  // Listen for bridge tx hash events from the modal (double-commit)
+  useEffect(() => {
+    const handler = async (evt: any) => {
+      const detail = evt?.detail;
+      if (!detail?.refId || !detail?.fromTxHash) return;
+      try {
+        await fetch('/api/deposits/route-progress', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(detail),
+        });
+      } catch {
+        // ignore; localStorage flush will retry
+      }
+      try {
+        const raw = localStorage.getItem('ev_pending_bridge');
+        const items = raw ? (JSON.parse(raw) as any[]) : [];
+        const updated = [
+          ...items.filter((e) => e?.refId !== detail.refId),
+          detail,
+        ];
+        localStorage.setItem('ev_pending_bridge', JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('ev:bridge-txhash', handler);
+    return () => window.removeEventListener('ev:bridge-txhash', handler);
+  }, []);
 
   // Success modals
   const [showDepositSuccess, setShowDepositSuccess] = useState(false);
