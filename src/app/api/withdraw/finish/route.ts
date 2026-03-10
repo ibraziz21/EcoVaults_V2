@@ -352,6 +352,7 @@ function applyBuffer(x: bigint) {
         provider: LSK_RPC,
         signer: RELAYER_PK,
         safeAddress: safeVault,
+        isL1SafeSingleton: false,
       })
 
       const tx: MetaTransactionData = {
