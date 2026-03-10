@@ -363,6 +363,8 @@ function applyBuffer(x: bigint) {
       }
 
       const safeTx = await protocolKit.createTransaction({ transactions: [tx] })
+      const safeNonce = safeTx.data.nonce
+      console.log('[withdraw/finish] Safe tx nonce', { refId, safeNonce, safeVault })
       const signed = await protocolKit.signTransaction(safeTx)
       const execRes = await protocolKit.executeTransaction(signed)
       const redeemTxHash =
