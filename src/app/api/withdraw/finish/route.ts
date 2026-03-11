@@ -63,6 +63,7 @@ const ERC4626_ABI = parseAbi([
   'function asset() view returns (address)',
   'function decimals() view returns (uint8)',
   'function previewRedeem(uint256 shares) view returns (uint256 assets)',
+  'function maxRedeem(address owner) view returns (uint256)',
   'function redeem(uint256 shares, address receiver, address owner) returns (uint256 assets)',
 ])
 
@@ -272,16 +273,23 @@ function applyBuffer(x: bigint) {
     const redeemSharesOG = scaleDecimals(receiptShares, receiptDecimals, vaultDecimals)
     const redeemShares = applyBuffer(redeemSharesOG)
 
-    /* 0) Preflight: make sure redeemShares produces >0 assets, and Safe has shares
-          (Fail BEFORE burn to avoid accounting mismatch) */
+    /* 0) Preflight: make sure redeemShares produces >0 assets, and the pool has
+          enough liquidity to cover the redemption. Fail BEFORE burn. */
     {
-      const safeShareBal = await readErc20Bal(liskPublic, morphoPool, safeVault as `0x${string}`)
-      const previewAssets = (await liskPublic.readContract({
-        address: morphoPool,
-        abi: ERC4626_ABI,
-        functionName: 'previewRedeem',
-        args: [redeemShares],
-      })) as bigint
+      const [maxRedeemable, previewAssets] = await Promise.all([
+        liskPublic.readContract({
+          address: morphoPool,
+          abi: ERC4626_ABI,
+          functionName: 'maxRedeem',
+          args: [safeVault as `0x${string}`],
+        }) as Promise<bigint>,
+        liskPublic.readContract({
+          address: morphoPool,
+          abi: ERC4626_ABI,
+          functionName: 'previewRedeem',
+          args: [redeemShares],
+        }) as Promise<bigint>,
+      ])
 
       console.log('[withdraw/finish] preflight', {
         refId,
@@ -291,12 +299,15 @@ function applyBuffer(x: bigint) {
         vaultDecimals: vaultDecimals.toString(),
         receiptShares: receiptShares.toString(),
         redeemShares: redeemShares.toString(),
-        safeShareBal: safeShareBal.toString(),
+        maxRedeemable: maxRedeemable.toString(),
         previewAssets: previewAssets.toString(),
       })
 
-      if (safeShareBal < redeemShares) {
-        throw new Error(`Safe has insufficient vault shares (have=${safeShareBal}, need=${redeemShares})`)
+      if (maxRedeemable < redeemShares) {
+        throw new Error(
+          `Morpho pool has insufficient liquidity to redeem: maxRedeem=${maxRedeemable}, need=${redeemShares}. ` +
+            `Retry when market liquidity recovers.`,
+        )
       }
       if (previewAssets <= 0n) {
         throw new Error(
@@ -352,22 +363,19 @@ function applyBuffer(x: bigint) {
         args: [redeemShares, relayer.address as `0x${string}`, safeVault as `0x${string}`],
       })
 
-      // Get current Safe nonce and compute the exact hash the Safe will ecrecover from
+      // Pre-approved owner signature (Safe sig type v=1):
+      // When msg.sender is an owner, Safe accepts r=ownerAddress, s=0, v=1
+      // without needing a separate approveHash call.
+      // Format: 32-byte owner address (left-padded) | 32 zero bytes | 0x01
+      const ownerR = relayer.address.toLowerCase().slice(2).padStart(64, '0')
+      const sig = `0x${ownerR}${'0'.repeat(64)}01` as `0x${string}`
+
       const safeNonce = await liskPublic.readContract({
         address: safeVault,
         abi: SAFE_ABI,
         functionName: 'nonce',
       })
-      const safeTxHash = await liskPublic.readContract({
-        address: safeVault,
-        abi: SAFE_ABI,
-        functionName: 'getTransactionHash',
-        args: [morphoPool, 0n, calldata, 0, 0n, 0n, 0n, ZERO_ADDR, ZERO_ADDR, safeNonce],
-      })
-      console.log('[withdraw/finish] Safe tx hash', { refId, safeTxHash, safeNonce: safeNonce.toString(), safeVault })
-
-      // Sign directly — no Ethereum prefix, matches what Safe's ecrecover expects
-      const sig = await relayer.sign({ hash: safeTxHash })
+      console.log('[withdraw/finish] Safe execTransaction', { refId, safeNonce: safeNonce.toString(), safeVault, relayer: relayer.address })
 
       const redeemTxHash = await liskWallet.writeContract({
         address: safeVault,
