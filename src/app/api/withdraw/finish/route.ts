@@ -17,10 +17,6 @@ import {
 import { privateKeyToAccount } from 'viem/accounts'
 import { optimism, lisk } from 'viem/chains'
 
-// Safe Protocol Kit v4+
-import Safe from '@safe-global/protocol-kit'
-import type { MetaTransactionData } from '@safe-global/types-kit'
-import { OperationType } from '@safe-global/types-kit'
 
 // LI.FI (server-side)
 import { createConfig, EVM, getQuote, convertQuoteToRoute, executeRoute } from '@lifi/sdk'
@@ -55,6 +51,14 @@ const liskPublic = createPublicClient({ chain: lisk, transport: http(LSK_RPC) })
 const liskWallet = createWalletClient({ chain: lisk, transport: http(LSK_RPC), account: relayer })
 
 /* ─────────────── ABIs ─────────────── */
+const SAFE_ABI = parseAbi([
+  'function nonce() view returns (uint256)',
+  'function getTransactionHash(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, uint256 _nonce) view returns (bytes32)',
+  'function execTransaction(address to, uint256 value, bytes data, uint8 operation, uint256 safeTxGas, uint256 baseGas, uint256 gasPrice, address gasToken, address refundReceiver, bytes signatures) payable returns (bool)',
+])
+
+const ZERO_ADDR = '0x0000000000000000000000000000000000000000' as `0x${string}`
+
 const ERC4626_ABI = parseAbi([
   'function asset() view returns (address)',
   'function decimals() view returns (uint8)',
@@ -348,32 +352,32 @@ function applyBuffer(x: bigint) {
         args: [redeemShares, relayer.address as `0x${string}`, safeVault as `0x${string}`],
       })
 
-      const protocolKit = await Safe.init({
-        provider: LSK_RPC,
-        signer: RELAYER_PK,
-        safeAddress: safeVault,
-        isL1SafeSingleton: false,
+      // Get current Safe nonce and compute the exact hash the Safe will ecrecover from
+      const safeNonce = await liskPublic.readContract({
+        address: safeVault,
+        abi: SAFE_ABI,
+        functionName: 'nonce',
+      })
+      const safeTxHash = await liskPublic.readContract({
+        address: safeVault,
+        abi: SAFE_ABI,
+        functionName: 'getTransactionHash',
+        args: [morphoPool, 0n, calldata, 0, 0n, 0n, 0n, ZERO_ADDR, ZERO_ADDR, safeNonce],
+      })
+      console.log('[withdraw/finish] Safe tx hash', { refId, safeTxHash, safeNonce: safeNonce.toString(), safeVault })
+
+      // Sign directly — no Ethereum prefix, matches what Safe's ecrecover expects
+      const sig = await relayer.sign({ hash: safeTxHash })
+
+      const redeemTxHash = await liskWallet.writeContract({
+        address: safeVault,
+        abi: SAFE_ABI,
+        functionName: 'execTransaction',
+        args: [morphoPool, 0n, calldata, 0, 0n, 0n, 0n, ZERO_ADDR, ZERO_ADDR, sig],
       })
 
-      const tx: MetaTransactionData = {
-        to: morphoPool,
-        value: '0',
-        data: calldata,
-        operation: OperationType.Call,
-      }
-
-      const safeTx = await protocolKit.createTransaction({ transactions: [tx] })
-      const safeNonce = safeTx.data.nonce
-      console.log('[withdraw/finish] Safe tx nonce', { refId, safeNonce, safeVault })
-      const signed = await protocolKit.signTransaction(safeTx)
-      const execRes = await protocolKit.executeTransaction(signed)
-      const redeemTxHash =
-        (execRes as any)?.hash ?? (execRes as any)?.transactionResponse?.hash ?? null
-
-      if (!redeemTxHash) throw new Error('Safe redeem tx hash not found')
-
       // Ensure it actually succeeded on-chain
-      const receipt = await liskPublic.waitForTransactionReceipt({ hash: redeemTxHash as `0x${string}` })
+      const receipt = await liskPublic.waitForTransactionReceipt({ hash: redeemTxHash })
       const status = (receipt as any)?.status
       if (status === 'reverted' || status === 0n || status === 0) {
         throw new Error(`Safe redeem reverted. tx=${redeemTxHash}`)
